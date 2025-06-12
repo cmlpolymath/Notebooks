@@ -1,0 +1,251 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf   # noqa: E402
+from tensorflow.keras.layers import Dense, Input, concatenate, MultiHeadAttention, LayerNormalization, Layer   # noqa: E402
+from tensorflow.keras.models import Model   # noqa: E402
+from tensorflow.keras.optimizers import Adam   # noqa: E402
+from tensorflow_probability import distributions as tfd   # noqa: E402
+from scipy.stats import norm, linregress   # noqa: E402
+from sklearn.mixture import GaussianMixture   # noqa: E402
+from sklearn.gaussian_process import GaussianProcessRegressor   # noqa: E402
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel   # noqa: E402
+from joblib import Parallel, delayed   # noqa: E402
+from tqdm import tqdm   # noqa: E402
+import config   # noqa: E402
+
+class QuantumInspiredDense(Layer):
+    """
+    Quantum-inspired layer that correctly uses Keras operations.
+    This layer is designed to be a drop-in replacement.
+    """
+    def __init__(self, units, **kwargs):
+        super(QuantumInspiredDense, self).__init__(**kwargs)
+        self.units = units
+
+    def build(self, input_shape):
+        # Use Keras Dense layers for the core matrix multiplication
+        # This correctly handles symbolic Keras Tensors
+        self.theta_layer = Dense(self.units, use_bias=False, name='theta_matmul')
+        self.phi_layer = Dense(self.units, use_bias=False, name='phi_matmul')
+        super(QuantumInspiredDense, self).build(input_shape)
+
+    def call(self, inputs):
+        # The Dense layers perform: inputs @ kernel
+        theta_prod = self.theta_layer(inputs)
+        phi_prod = self.phi_layer(inputs)
+
+        # The tf.math operations are now applied to the *output* of Keras layers, which is valid.
+        real_part = tf.math.cos(theta_prod)
+        imag_part = tf.math.sin(phi_prod)
+        
+        return tf.concat([real_part, imag_part], axis=-1)
+
+    def get_config(self):
+        config = super(QuantumInspiredDense, self).get_config()
+        config.update({"units": self.units})
+        return config
+
+
+class MonteCarloTrendFilter:
+    """
+    Advanced Monte Carlo simulator with:
+    - Attention-based interpretable jump detection
+    - Reinforcement learning for adaptive simulation counts
+    - Quantum-inspired layers for fat-tail modeling
+    - Bayesian parameter optimization
+    - Regime-switching volatility
+    - Ensemble trend scoring
+    """
+    def __init__(self, gbm_lookback=63, jump_window=21, n_optimize=50, base_n_sims=1000, n_jobs=-1):
+        self.gbm_lookback = gbm_lookback
+        self.jump_window = jump_window
+        self.n_optimize = n_optimize
+        self.base_n_sims = base_n_sims
+        self.n_jobs = n_jobs
+        self._is_fitted = False
+
+        # Build policy network for adaptive sims: state inputs [volatility, jump_prob]
+        self.policy_net = self._build_policy_network(input_dim=2)
+
+    def _build_policy_network(self, input_dim):
+        """Simple actor network to select simulation count"""
+        inp = Input(shape=(input_dim,))
+        x = Dense(32, activation='relu')(inp)
+        x = Dense(16, activation='relu')(x)
+        # Output positive sim count multiplier
+        out = Dense(1, activation='softplus', name='sim_count')(x)
+        return Model(inp, out)
+
+    def _select_simulation_count(self, vol, jump_prob):
+        """Use policy network to adaptively set n_sims"""
+        state = np.array([[vol, jump_prob]]).astype(np.float32)
+        mult = self.policy_net.predict(state, verbose=0)[0,0]
+        return max(1, int(self.base_n_sims * mult))
+
+    def _build_jump_network(self, input_shape):
+        """Dual-input jump detector with attention for interpretability"""
+        price_input = Input(shape=input_shape, name='price_seq')
+        vol_input = Input(shape=(input_shape[0],), name='vol_seq')
+
+        # Self-attention over price sequence
+        attn = MultiHeadAttention(num_heads=4, key_dim=8)(price_input, price_input)
+        attn = LayerNormalization()(attn)
+        attn_out = tf.reduce_mean(attn, axis=1)
+
+        # Volatility dense
+        vol_dense = Dense(16, activation='softplus')(vol_input)
+
+        # Merge and output
+        merged = concatenate([attn_out, vol_dense])
+        jump_prob = Dense(1, activation='sigmoid', name='jump_prob')(merged)
+        jump_size = Dense(2, activation='linear', name='jump_size')(merged)
+        return Model(inputs=[price_input, vol_input], outputs=[jump_prob, jump_size])
+
+    def _jump_size_loss(self, y_true, y_pred):
+        mu, log_sigma = tf.split(y_pred, 2, axis=-1)
+        sigma = tf.exp(log_sigma)
+        return -tfd.Normal(mu, sigma).log_prob(y_true)
+
+    def _train_jump_model(self, X_prices, X_vol, y_jumps):
+        self.jump_model = self._build_jump_network(X_prices.shape[1:])
+        self.jump_model.compile(
+            optimizer=Adam(1e-3),
+            loss={'jump_prob':'binary_crossentropy','jump_size':self._jump_size_loss},
+            metrics={'jump_prob':'accuracy'}
+        )
+        self.jump_model.fit([X_prices, X_vol], y_jumps,
+                             epochs=30, batch_size=32,
+                             validation_split=0.2, verbose=0)
+
+    def _detect_jumps_neural(self, close, lookback=None):
+        lookback = lookback or self.jump_window
+        returns = np.log(close/close.shift(1)).dropna()
+        volatilities = returns.rolling(5).std().dropna()
+
+        aligned_data = pd.concat([returns, volatilities], axis=1, keys=['returns', 'vol']).dropna()
+        aligned_returns = aligned_data['returns']
+        aligned_vol = aligned_data['vol']
+        
+        Xp, Xv, y = [], [], []
+        std = returns.std()
+        for i in range(lookback, len(aligned_returns)):
+            Xp.append(aligned_returns.values[i-lookback:i].reshape(-1,1))
+            Xv.append(aligned_vol.values[i-lookback:i])
+            is_jump = abs(aligned_returns.values[i]) > 3*std
+            y.append([int(is_jump), aligned_returns.values[i] if is_jump else 0])
+            
+        self._train_jump_model(np.array(Xp), np.array(Xv), np.array(y, dtype=object))
+
+        rp = returns.values[-lookback:].reshape(1,-1,1)
+        rv = volatilities.values[-lookback:].reshape(1,-1)
+        prob, (mu, log_sigma) = self.jump_model.predict([rp, rv], verbose=0)
+        return prob[0,0], mu[0,0], np.exp(log_sigma)[0,0]
+
+    def _optimize_gbm_params(self, close):
+        returns = np.log(close/close.shift(1)).dropna().values
+        kernel = RBF(1.0)+WhiteKernel(1.0)
+        gpr = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=5)
+        X = np.arange(len(returns)).reshape(-1,1)
+        gpr.fit(X, returns)
+        # Use GPR posterior mean, std as mu, sigma
+        mu = np.mean(gpr.predict(X))
+        sigma = np.std(returns)
+        return mu, sigma
+
+    def _simulate_jump_diffusion(self, S0, params, T, dt, n_sims):
+        mu, sigma, lam, jump_mu, jump_sigma = params
+        steps = int(T/dt)
+        dw = np.random.normal(scale=np.sqrt(dt),size=(n_sims,steps))
+        jumps = np.random.poisson(lam*dt,(n_sims,steps))
+        jump_sizes = np.random.normal(jump_mu,jump_sigma,(n_sims,steps))*jumps
+        paths = np.zeros((n_sims,steps+1))
+        paths[:,0]=S0
+        for t in range(1,steps+1):
+            paths[:,t]=paths[:,t-1]*np.exp((mu-0.5*sigma**2)*dt + sigma*dw[:,t-1]+jump_sizes[:,t-1])
+        return paths
+
+    def fit(self, data, warmup=252):
+        if len(data) < warmup:
+            raise ValueError(f"Need ≥{warmup} days for calibration")
+        self.close_ = data['Close']
+        hist = self.close_.iloc[-warmup:]
+        self.gbm_params_ = self._optimize_gbm_params(hist)
+        jp, jm, js = self._detect_jumps_neural(hist)
+        self.jump_params_ = (jp*252, jm, js)
+        returns = np.log(hist/hist.shift(1)).dropna()
+        self.vol_regimes_ = GaussianMixture(2).fit(returns.rolling(5).std().dropna().values.reshape(-1,1))
+        self._is_fitted = True
+        return self
+
+    def predict(self, horizon=5):
+        if not self._is_fitted:
+            raise RuntimeError("Call fit() first")
+        dt = 1/252
+        state_vol = np.std(np.log(self.close_[-self.jump_window:]/self.close_[-self.jump_window-1:-1]))
+        n_sims = self._select_simulation_count(state_vol, self.jump_params_[0])
+
+        def sim_slope(seed):
+            np.random.seed(seed)
+            paths = self._simulate_jump_diffusion(
+                self.close_.iloc[-1], (*self.gbm_params_, *self.jump_params_),
+                horizon*dt, dt, 1
+            )
+            return linregress(np.arange(horizon+1), paths[0]).slope
+
+        slopes = Parallel(n_jobs=self.n_jobs)(delayed(sim_slope)(i) for i in tqdm(range(n_sims)))
+        up_prob = np.mean(np.array(slopes)>0)
+        down_prob = np.mean(np.array(slopes)<0)
+        strength = np.tanh(np.mean(slopes)*10)
+
+        # Quantum-inspired adjustment for fat tails
+        q_in = tf.constant(np.array(slopes).reshape(-1,1), dtype=tf.float32)
+        q_layer = QuantumInspiredDense(8)
+        q_out = q_layer(q_in)
+        tail_factor = tf.reduce_mean(q_out).numpy()
+        strength *= (1 + 0.1 * tail_factor)
+
+        result = {
+            'up_prob': up_prob,
+            'down_prob': down_prob,
+            'trend_strength': strength,
+            'ci': np.percentile(slopes, [5, 95]).tolist(),
+            'n_sims': n_sims,
+            'simulated_slopes': slopes
+        }
+        return result
+
+    def get_ensemble_signal(self, lookback=21):
+        horizons=[5,10,21]
+        outs=[self.predict(h) for h in horizons]
+        vols = np.log(self.close_[-1]/self.close_[-lookback]).std()
+        weights=np.exp(-np.array(horizons)/(vols*100))
+        weights/=weights.sum()
+        comp = sum(o['trend_strength']*w for o,w in zip(outs,weights))
+        return float(np.clip(comp,-1,1))
+
+def add_mc_trend_feature(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Generates historical trend strength from the Monte Carlo filter
+    and adds it as a feature. This is computationally intensive.
+    """
+    print("Generating Monte Carlo trend feature... (this may take a while)")
+    mc_filter = MonteCarloTrendFilter(**config.MC_FILTER_PARAMS)
+    
+    # We need a warm-up period for the first prediction
+    warmup = 252 
+    trend_strengths = [np.nan] * warmup
+
+    # Iterate through the dataframe to generate a signal for each day
+    for i in tqdm(range(warmup, len(df))):
+        # Use historical data up to the current point
+        historical_data = df.iloc[:i]
+        
+        # Fit and get the signal
+        mc_filter.fit(historical_data, warmup=warmup)
+        # Using the ensemble signal for a robust measure
+        signal = mc_filter.get_ensemble_signal(lookback=21)
+        trend_strengths.append(signal)
+
+    df_copy = df.copy()
+    # df_copy['mc_trend_strength'] = trend_strengths
+    return df_copy

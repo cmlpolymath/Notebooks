@@ -1,0 +1,99 @@
+feature_engineering.py:5:26: F401 [*] `scipy.signal.find_peaks` imported but unused
+  |
+3 | import numpy as np
+4 | from numpy.lib.stride_tricks import sliding_window_view
+5 | from scipy.signal import find_peaks
+  |                          ^^^^^^^^^^ F401
+6 |
+7 | class FeatureCalculator:
+  |
+  = help: Remove unused import: `scipy.signal.find_peaks`
+
+predictors.py:8:25: F401 [*] `scipy.stats.norm` imported but unused
+   |
+ 6 | from tensorflow.keras.optimizers import Adam
+ 7 | from tensorflow_probability import distributions as tfd
+ 8 | from scipy.stats import norm, linregress
+   |                         ^^^^ F401
+ 9 | from sklearn.mixture import GaussianMixture
+10 | from sklearn.gaussian_process import GaussianProcessRegressor
+   |
+   = help: Remove unused import: `scipy.stats.norm`
+
+predictors.py:137:47: E702 Multiple statements on one line (semicolon)
+    |
+135 |         jumps    = np.random.poisson(lam*dt, size=(n_sims,steps))
+136 |         sizes    = np.random.normal(jm, js, size=(n_sims,steps)) * jumps
+137 |         paths    = np.zeros((n_sims, steps+1)); paths[:,0] = S0
+    |                                               ^ E702
+138 |         for t in range(1, steps+1):
+139 |             paths[:,t] = paths[:,t-1] * np.exp((mu-0.5*sigma**2)*dt + sigma*dw[:,t-1] + sizes[:,t-1])
+    |
+
+run.py:2:8: F401 [*] `initialize` imported but unused
+  |
+1 | # run.py
+2 | import initialize
+  |        ^^^^^^^^^^ F401
+3 | import argparse
+4 | import re
+  |
+  = help: Remove unused import: `initialize`
+
+run.py:9:18: F401 [*] `pandas` imported but unused
+   |
+ 7 | import torch.nn.functional as F
+ 8 | import numpy as np
+ 9 | import pandas as pd
+   |                  ^^ F401
+10 | # Import project modules
+11 | import config
+   |
+   = help: Remove unused import: `pandas`
+
+run.py:91:21: F841 Local variable `y_seq_test` is assigned to but never used
+   |
+89 |         train_seq_len = len(train_df) - config.TRANSFORMER_SEQUENCE_WINDOW + 1
+90 |         X_seq_train, y_seq_train = X_seq[:train_seq_len], y_seq[:train_seq_len]
+91 |         X_seq_test, y_seq_test = X_seq[train_seq_len:], y_seq[train_seq_len:]
+   |                     ^^^^^^^^^^ F841
+92 |         
+93 |         transformer_model, device = models.train_transformer(X_seq_train, y_seq_train)
+   |
+   = help: Remove assignment to unused variable `y_seq_test`
+
+visualization.py:240:5: F841 Local variable `mc_strength` is assigned to but never used
+    |
+238 |     kelly = metrics.get("kelly_fraction", 0.0)
+239 |     accuracy = metrics.get("accuracy", 0.0)
+240 |     mc_strength = metrics.get("mc_trend_strength", 0.0)
+    |     ^^^^^^^^^^^ F841
+241 |     mc_up_prob = metrics.get("mc_up_prob", 0.0)
+242 |     mc_down_prob = metrics.get("mc_down_prob", 0.0)
+    |
+    = help: Remove assignment to unused variable `mc_strength`
+
+visualization.py:241:5: F841 Local variable `mc_up_prob` is assigned to but never used
+    |
+239 |     accuracy = metrics.get("accuracy", 0.0)
+240 |     mc_strength = metrics.get("mc_trend_strength", 0.0)
+241 |     mc_up_prob = metrics.get("mc_up_prob", 0.0)
+    |     ^^^^^^^^^^ F841
+242 |     mc_down_prob = metrics.get("mc_down_prob", 0.0)
+243 |     mc_ci = metrics.get("mc_ci", [None, None])
+    |
+    = help: Remove assignment to unused variable `mc_up_prob`
+
+visualization.py:242:5: F841 Local variable `mc_down_prob` is assigned to but never used
+    |
+240 |     mc_strength = metrics.get("mc_trend_strength", 0.0)
+241 |     mc_up_prob = metrics.get("mc_up_prob", 0.0)
+242 |     mc_down_prob = metrics.get("mc_down_prob", 0.0)
+    |     ^^^^^^^^^^^^ F841
+243 |     mc_ci = metrics.get("mc_ci", [None, None])
+244 |     verdict = get_fuzzy_verdict(kelly)
+    |
+    = help: Remove assignment to unused variable `mc_down_prob`
+
+Found 9 errors.
+[*] 4 fixable with the `--fix` option (4 hidden fixes can be enabled with the `--unsafe-fixes` option).

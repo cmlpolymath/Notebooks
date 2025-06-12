@@ -1,0 +1,48 @@
+# config.py
+from datetime import datetime, timedelta
+
+# --- Data Configuration ---
+START_DATE = (datetime.today() - timedelta(days=365*10)).strftime('%Y-%m-%d')
+END_DATE = datetime.today().strftime('%Y-%m-%d')
+
+# --- Feature Configuration ---
+# List of feature columns to be used by the models
+FEATURE_COLS = [
+    'RSI14', 'MACD_line', 'MACD_signal', 'MACD_hist', 'ATR14',
+    'BB_mid', 'BB_upper', 'BB_lower', 'OBV', '%K', '%D',
+    'MFI14', 'CCI20', 'Williams_%R', 'ROC10', 'GARCH_vol',
+    'Dominant_Period', 'Return1', 'Close', 'Volume',
+]
+
+# --- Model Configuration ---
+# Train/Test Split
+TRAIN_SPLIT_RATIO = 0.8
+
+# XGBoost Parameters
+XGB_PARAMS = {
+    'n_estimators': 100,
+    'random_state': 42,
+    'eval_metric': 'logloss'
+}
+
+# Transformer Parameters
+TRANSFORMER_SEQUENCE_WINDOW = 60
+TRANSFORMER_PARAMS = {
+    'd_model': 64,
+    'nhead': 4,
+    'num_layers': 2,
+    'num_classes': 2
+}
+TRANSFORMER_TRAINING = {
+    'epochs': 5,
+    'batch_size': 32,
+    'lr': 0.001
+}
+
+# Monte Carlo Predictor
+MC_FILTER_PARAMS = {
+    'gbm_lookback': 63,
+    'jump_window': 21,
+    'n_optimize': 50,
+    'n_jobs': -1
+}

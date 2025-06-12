@@ -1,0 +1,43 @@
+Audit database ready at 'results/audit_log.duckdb'
+2025-06-10 17:19:26.261541: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1749575966.297918   10022 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1749575966.306366   10022 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1749575966.339490   10022 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1749575966.339620   10022 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1749575966.339640   10022 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1749575966.339644   10022 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+
+==================== Processing Ticker: RYCEY ====================
+Found cached data for RYCEY at 'data/RYCEY.parquet'
+Data for RYCEY is up-to-date. Loading from cache.
+Data cleaned: Removed 0 rows with NaN/inf values.
+Training XGBoost model...
+Training Transformer model...
+Using device: cuda
+Epoch 1: Loss is NaN. Skipping update and stopping training.
+Generating final Monte-Carlo signal...
+I0000 00:00:1749575970.830179   10022 gpu_device.cc:2019] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 2719 MB memory:  -> device: 0, name: NVIDIA GeForce GTX 1050 Ti, pci bus id: 0000:01:00.0, compute capability: 6.1
+/opt/conda/lib/python3.12/site-packages/sklearn/gaussian_process/kernels.py:452: ConvergenceWarning: The optimal value found for dimension 0 of parameter k1__length_scale is close to the specified upper bound 100000.0. Increasing the bound and calling fit again may find a better value.
+  warnings.warn(
+Could not generate Monte-Carlo signal: A KerasTensor cannot be used as input to a TensorFlow function. A KerasTensor is a symbolic placeholder for a shape and dtype, used when constructing Keras Functional models or Keras Functions. You can only use it as input to a Keras layer or a Keras operation (from the namespaces `keras.layers` and `keras.ops`). You are likely doing something like:
+
+```
+x = Input(...)
+...
+tf_fn(x)  # Invalid.
+```
+
+What you should do instead is wrap `tf_fn` in a layer:
+
+```
+class MyLayer(Layer):
+    def call(self, x):
+        return tf_fn(x)
+
+x = MyLayer()(x)
+```
+
+Calculating SHAP values...
+Calculating SHAP values...
+Analysis for RYCEY complete. Results logged.
