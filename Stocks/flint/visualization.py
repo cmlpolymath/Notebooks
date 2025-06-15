@@ -480,7 +480,7 @@ if __name__ == "__main__":
 
         # 3. Run the Dash server
         print(f"Launching dashboard for {args.ticker.upper()}. Open http://127.0.0.1:8050 in your browser.")
-        app.run_server(debug=True)
+        app.run(debug=True)
 
     except (FileNotFoundError, ValueError) as e:
         print(f"ERROR: {e}")

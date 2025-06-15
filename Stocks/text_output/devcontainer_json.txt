@@ -1,0 +1,56 @@
+{
+  "name": "SmartDev",
+
+  // ─── Point at the Compose file (in the same .devcontainer folder) ───
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "smart_dev",
+  "workspaceFolder": "/workspaces/smart_dev",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-vscode-remote.remote-containers",
+        "ms-azuretools.vscode-docker",
+        "rust-lang.rust-analyzer",
+        "ms-toolsai.jupyter",
+        "xelad0m.jupyter-toc",
+        "catppuccin.catppuccin-vsc",
+        "ms-toolsai.datawrangler",
+        "fill-labs.dependi",
+        "djsaunders1997.uv-wingman",
+        "reditorsupport.r",
+        "visualstudioexptteam.vscodeintellicode",
+        "charliermarsh.ruff",
+        "ms-vscode.live-server",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-mysql",
+        "mtxr.sqltools-driver-sqlite",
+        "mtxr.sqltools-driver-pg"
+      ]
+    }
+  },
+  // ─── Use “vscode” as the unprivileged user (with sudo rights) ───
+  "remoteUser": "vscode",
+  "containerUser": "vscode",
+  "updateRemoteUserUID": false,
+
+  // ─── Bind mounts (cached for WSL2 performance) ───
+  "mounts": [
+    "source=/mnt/c/Users/cml_p,target=/mnt/hostuser,type=bind,consistency=cached",
+    "source=/mnt/g,target=/mnt/gdrive,type=bind,consistency=cached"
+  ],
+
+  // ─── Post-create: install uv CLI, then (later) install Python deps ───
+  // Runs as “vscode” user by default, so uv lands in ~/.local/bin and is on PATH.
+  "postCreateCommand": [
+    "bash",
+    "-lc",
+    "sudo apt-get update -y && \
+    sudo apt-get install -y curl ca-certificates && \
+    curl -fsSL https://astral.sh/uv/install.sh | sh && \
+    uv pip install --system --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121 && \
+    uv pip install --system --no-cache-dir -r /workspaces/smart_dev/requirements.txt"
+  ],
+  "postStartCommand": "sudo chown -R 1000:1000 /workspaces/smart_dev"
+}
