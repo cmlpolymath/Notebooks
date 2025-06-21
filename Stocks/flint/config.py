@@ -17,6 +17,7 @@ FEATURE_COLS = [
 # --- Model Configuration ---
 # Train/Test Split
 TRAIN_SPLIT_RATIO = 0.8
+SEQUENCE_WINDOW_SIZE = 60 # The number of past time steps the Transformer looks at for each prediction.
 
 # XGBoost Parameters
 XGB_PARAMS = {
@@ -25,9 +26,27 @@ XGB_PARAMS = {
     'eval_metric': 'logloss'
 }
 
-# Monte Carlo Predictor (Simplified Parameters)
-MC_FILTER_PARAMS = {
-    'lookback_days': 252,  # Use 1 year of data to calculate drift and volatility
-    'n_simulations': 1000, # Number of simulation paths
-    'horizon_days': 21      # Predict 1 month into the future
+# Transformer Model Hyperparameters
+TRANSFORMER_PARAMS = {
+    'd_model': 128,
+    'nhead': 8,
+    'num_layers': 4,
+    'num_classes': 2 # Binary classification (Up/Down)
+}
+
+# Transformer Training Configuration
+TRANSFORMER_TRAINING = {
+    'lr': 0.0001,
+    'batch_size': 64,
+    'epochs': 50
+}
+
+# Advanced Monte Carlo Predictor Parameters
+# These now match the constructor of MonteCarloTrendFilter
+ADVANCED_MC_PARAMS = {
+    'gbm_lookback': 63,
+    'jump_window': 21,
+    'n_optimize': 50,
+    'base_n_sims': 1000,
+    'n_jobs': -1
 }

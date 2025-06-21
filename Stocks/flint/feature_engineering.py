@@ -108,7 +108,9 @@ class FeatureCalculator:
         for r in returns.iloc[1:]:
             new_var = omega + alpha * (r**2) + beta * garch_vars[-1]
             garch_vars.append(new_var)
-        self.df['GARCH_vol'] = np.sqrt(garch_vars)
+        # Cap volatility at a reasonable maximum (e.g., 200% annualized) to prevent overflows
+        garch_vol_series = pd.Series(np.sqrt(garch_vars), index=self.df.index)
+        self.df['GARCH_vol'] = garch_vol_series.clip(upper=2.0 / np.sqrt(252))
         
     def _add_returns(self):
         self.df['Return1'] = self.df['Close'].pct_change().fillna(0) * 100

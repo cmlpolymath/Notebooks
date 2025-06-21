@@ -7,13 +7,13 @@ from plotly.subplots import make_subplots
 import numpy as np
 import dash
 import dash_bootstrap_components as dbc
-from dash import dcc, html
+from dash import dcc, html, Input, Output, State
 import argparse
 import duckdb
 import json
 from pathlib import Path
 
-# --- Import project modules to re-generate data needed for plots ---
+# --- Import project modules ---
 import data_handler
 import config
 from feature_engineering import FeatureCalculator
@@ -219,271 +219,151 @@ def plot_mc_distribution(mc_results: dict) -> go.Figure:
         err_fig.add_annotation(text=f"Error generating MC chart:<br>{e}", showarrow=False)
         return err_fig
 
-def create_dashboard(
-    ticker: str,
-    df_features: pd.DataFrame,
-    test_df: pd.DataFrame,
-    predictions: pd.Series,
-    feature_importance: pd.Series,
-    metrics: dict,
-    mc_results: dict
-) -> dash.Dash:
-    """Assembles the plots and metrics into a Dash application."""
-    # Build Figures with error handling
+def get_available_models(ticker: str) -> list:
+    """Queries the database to find all unique model_name entries for a ticker."""
+    db_path = Path('results/audit_log.duckdb')
+    if not db_path.exists():
+        return []
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        models_df = con.execute(
+            "SELECT DISTINCT model_name FROM analysis_results WHERE ticker = ? ORDER BY model_name",
+            [ticker]
+        ).fetchdf()
+        return models_df['model_name'].tolist()
+    finally:
+        con.close()
+
+def create_app_layout(ticker: str, available_models: list):
+    """Creates the Dash app layout with a dropdown for model selection."""
+    return dbc.Container(
+        [
+            html.H1(f"Algorithmic Audit: {ticker}", className="text-center text-primary my-4"),
+            dbc.Row([
+                dbc.Col(html.Label("Select Model to View:"), width="auto"),
+                dbc.Col(
+                    dcc.Dropdown(
+                        id='model-dropdown',
+                        options=[{'label': m, 'value': m} for m in available_models],
+                        value=available_models[0] if available_models else None,
+                        clearable=False
+                    ),
+                ),
+            ], className="mb-4 align-items-center"),
+            # This Div will be populated by the callback
+            html.Div(id='dashboard-content', children=[
+                dbc.Spinner(color="primary") # Show a spinner on initial load
+            ])
+        ],
+        fluid=True
+    )
+
+def build_dashboard_content(ticker, df_features, test_df, predictions, feature_importance, metrics, mc_results):
+    """Builds the actual charts and metrics cards for the dashboard."""
     price_fig = plot_price_with_signals(ticker, df_features, test_df.index, predictions)
     importance_fig = plot_feature_importance(feature_importance)
     mc_fig = plot_mc_distribution(mc_results)
 
-    # Metrics
     kelly = metrics.get("kelly_fraction", 0.0)
     accuracy = metrics.get("accuracy", 0.0)
     mc_strength = metrics.get("mc_trend_strength", 0.0)
-    mc_up_prob = metrics.get("mc_up_prob", 0.0)
-    mc_down_prob = metrics.get("mc_down_prob", 0.0)
-    mc_ci = metrics.get("mc_ci", [None, None])
     verdict = get_fuzzy_verdict(kelly)
 
-    app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
-    app.layout = dbc.Container(
-        children=[
-            # Header
-            dbc.Row(
-                dbc.Col(
-                    html.H1(
-                        f"Algorithmic Audit: {ticker}",
-                        className="text-center text-primary mb-4"
-                    ),
-                    width=12
-                ),
-                className="mt-4"
-            ),
+    return html.Div([
+        dbc.Row([
+            dbc.Col(dbc.Card(dbc.CardBody([html.H4("Final Verdict"), html.H2(verdict, className=f"text-{'success' if kelly > 0 else 'danger'}")])), width=4),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H4("Model Certainty"), html.P(f"Kelly Bet: {kelly:.2f} | Accuracy: {accuracy:.2%}")])), width=4),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H4("MC Forecast"), html.P(f"Trend Strength: {mc_strength:.3f}")])), width=4),
+        ], className="mb-4"),
+        dbc.Row(dbc.Col(dcc.Graph(figure=price_fig), width=12), className="mb-4"),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=importance_fig), width=6),
+            dbc.Col(dcc.Graph(figure=mc_fig), width=6),
+        ]),
+    ])
 
-            # Metrics
-            dbc.Row(
-                [
-                    dbc.Col(
-                        dbc.Card(
-                            dbc.CardBody(
-                                [
-                                    html.H4("Final Verdict", className="card-title"),
-                                    html.H2(
-                                        verdict,
-                                        className=f"card-text {'text-success' if kelly > 0 else 'text-danger'}"
-                                    ),
-                                ]
-                            )
-                        ),
-                        width=3,
-                    ),
-                    dbc.Col(
-                        dbc.Card(
-                            dbc.CardBody(
-                                [
-                                    html.H4("Kelly Criterion", className="card-title"),
-                                    html.H2(f"{kelly:.2f}", className="card-text"),
-                                ]
-                            )
-                        ),
-                        width=3,
-                    ),
-                    dbc.Col(
-                        dbc.Card(
-                            dbc.CardBody(
-                                [
-                                    html.H4("Test Accuracy", className="card-title"),
-                                    html.H2(f"{accuracy:.2%}", className="card-text"),
-                                ]
-                            )
-                        ),
-                        width=3,
-                    ),
-                    dbc.Col(
-                        dbc.Card(
-                            dbc.CardBody(
-                                [
-                                    html.H4("MC Trend Strength", className="card-title"),
-                                    html.H2(f"{metrics.get('mc_trend_strength', 0.0):.3f}", className="card-text"),
-                                ]
-                            )
-                        ),
-                        width=3,
-                    ),
-                    dbc.Col(
-                        dbc.Card(
-                            dbc.CardBody(
-                                [
-                                    html.H4("MC Up Probability", className="card-title"),
-                                    html.H2(f"{metrics.get('mc_up_prob', 0.0):.3f}", className="card-text"),
-                                ]
-                            )
-                        ),
-                        width=3,
-                    ),
-                    dbc.Col(
-                        dbc.Card(
-                            dbc.CardBody(
-                                [
-                                    html.H4("MC Down Probability", className="card-title"),
-                                    html.H2(f"{metrics.get('mc_down_prob', 0.0):.3f}", className="card-text"),
-                                ]
-                            )
-                        ),
-                        width=3,
-                    ),
-                    dbc.Col(
-                        dbc.Card(
-                            dbc.CardBody(
-                                [
-                                    html.H4("MC Confidence Interval", className="card-title"),
-                                    html.H2(f"[{mc_ci[0]:.3f}, {mc_ci[1]:.3f}]", className="card-text"),
-                                ]
-                            )
-                        ),
-                        width=3,
-                    ),
-                ],
-                className="mb-4",
-            ),
-
-            # Price Chart
-            dbc.Row(
-                dbc.Col(
-                    dcc.Graph(
-                        id="price-chart",
-                        figure=price_fig
-                        ),
-                     width=12
-                ),
-            className="mt-4"
-            ),
-                        
-            # Bottom row for Importance and MC plots
-            dbc.Row(
-                [
-                    dbc.Col(
-                        dcc.Graph(
-                            id="importance-chart",
-                            figure=importance_fig
-                            ),
-                        width=6
-                    ),
-                    dbc.Col(
-                        dcc.Graph(
-                            id="mc-chart",
-                            figure=mc_fig
-                        ),
-                        width=6
-                    ),
-                ],
-                className="mt-4"
-            ),
-        ],
-        fluid=True,
-    )
-
-    return app
-def load_latest_run_data(ticker: str):
-    """
-    Loads all necessary data for visualization from the database and by re-running
-    the data pipeline.
-    """
-    print(f"Loading latest run data for ticker: {ticker}")
+def load_run_data(ticker: str, model_name: str):
+    """Loads all necessary data for visualization from the database for a specific model run."""
+    print(f"Loading run data for ticker: {ticker}, model: {model_name}")
     db_path = Path('results/audit_log.duckdb')
     if not db_path.exists():
         raise FileNotFoundError(f"Audit database not found at {db_path}. Please run 'run.py' first.")
 
     con = duckdb.connect(str(db_path), read_only=True)
     try:
-        # Query for the most recent run for the given ticker
         result_df = con.execute(
-            """
-            SELECT * FROM analysis_results 
-            WHERE ticker = ? 
-            ORDER BY execution_timestamp DESC 
-            LIMIT 1
-            """,
-            [ticker]
+            "SELECT * FROM analysis_results WHERE ticker = ? AND model_name = ? ORDER BY execution_timestamp DESC LIMIT 1",
+            [ticker, model_name]
         ).fetchdf()
     finally:
         con.close()
 
     if result_df.empty:
-        raise ValueError(f"No analysis results found for ticker '{ticker}' in the database.")
+        raise ValueError(f"No results found for ticker '{ticker}' and model '{model_name}'.")
 
-    # Extract data from the first (and only) row
     latest_run = result_df.iloc[0]
-    
-    # Parse JSON strings back into Python objects
     metrics = json.loads(latest_run['metrics'])
     predictions_data = json.loads(latest_run['predictions'])
-    # run_config = json.loads(latest_run['run_config']) # We might need this later
-    
-    # Reconstruct feature importance Series
-    # Note: This assumes 'shap_importance' and 'feature_names' were added to the log
     shap_data = json.loads(latest_run.get('shap_importance', '{}'))
+    
     feature_importance = pd.Series(
         data=shap_data.get('values', []),
         index=shap_data.get('features', [])
     )
-    # The price chart needs the full historical data, which isn't in the log.
-    # We re-generate it here. This is good practice as the log only stores results.
+    
     print("Re-generating feature data for plotting...")
-    df_raw = data_handler.get_stock_data(
-        ticker=ticker,
-        start_date=config.START_DATE,
-        end_date=config.END_DATE
-    )
+    df_raw = data_handler.get_stock_data(ticker=ticker, start_date=config.START_DATE, end_date=config.END_DATE)
+    df_raw['Date'] = pd.to_datetime(df_raw['Date'])
+    df_raw.set_index('Date', inplace=True)
+    
     df_features = FeatureCalculator(df_raw).add_all_features()
-    df_features.set_index('Date', inplace=True)
-
+    
     # Recreate the train/test split to find the index for plotting signals
-    train_size = int(len(df_features) * config.TRAIN_SPLIT_RATIO)
-    test_df = df_features.iloc[train_size:]
+    df_model = df_features.copy()
+    df_model['UpNext'] = (df_model['Close'].shift(-1) > df_model['Close']).astype(int)
+    df_model.dropna(inplace=True)
     
-    # The logged predictions are probabilities. Convert to binary 0/1 for plotting.
-    # The final prediction is an ensemble, but we can use the XGBoost proba for signals.
-    xgb_proba = predictions_data.get('probabilities', [])
-    binary_predictions = pd.Series([1 if p > 0.5 else 0 for p in xgb_proba])
+    train_size = int(len(df_model) * config.TRAIN_SPLIT_RATIO)
     
-    # MC results are in the metrics blob
-    mc_results = {
-        "simulated_slopes": metrics.get("mc_simulated_slopes")
-    }
+    if 'Transformer' in model_name:
+        # For transformer, the test set starts after the sequence window offset
+        offset = config.SEQUENCE_WINDOW_SIZE - 1
+        test_df = df_model.iloc[train_size + offset:]
+    else:
+        test_df = df_model.iloc[train_size:]
+
+    binary_predictions = pd.Series([1 if p > 0.5 else 0 for p in predictions_data.get('probabilities', [])])
+    mc_results = {"simulated_slopes": metrics.get("mc_simulated_slopes")}
 
     return df_features, test_df, binary_predictions, feature_importance, metrics, mc_results
 
 if __name__ == "__main__":
-    # Use argparse to get the ticker from the command line
-    parser = argparse.ArgumentParser(description="Launch the stock analysis dashboard.")
-    parser.add_argument(
-        'ticker',
-        metavar='TICKER',
-        type=str,
-        help='The stock ticker to visualize (e.g., AAPL, TSLA).'
-    )
+    parser = argparse.ArgumentParser(description="Launch the interactive stock analysis dashboard.")
+    parser.add_argument('ticker', metavar='TICKER', type=str, help='The stock ticker to visualize.')
     args = parser.parse_args()
     
-    try:
-        # 1. Load real data from the database
-        df_features, test_df, predictions, feature_importance, metrics, mc_results = load_latest_run_data(args.ticker.upper())
+    ticker = args.ticker.upper()
+    app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
+    
+    available_models = get_available_models(ticker)
+    if not available_models:
+        print(f"ERROR: No models have been run for {ticker}. Please run 'python run.py {ticker}' first.")
+    else:
+        app.layout = create_app_layout(ticker, available_models)
 
-        # 2. Create the dashboard with the loaded data
-        app = create_dashboard(
-            ticker=args.ticker.upper(),
-            df_features=df_features,
-            test_df=test_df,
-            predictions=predictions,
-            feature_importance=feature_importance,
-            metrics=metrics,
-            mc_results=mc_results
+        @app.callback(
+            Output('dashboard-content', 'children'),
+            Input('model-dropdown', 'value')
         )
+        def update_dashboard(selected_model):
+            if not selected_model:
+                return html.Div("Please select a model to view the analysis.", className="text-center")
+            try:
+                (df_features, test_df, predictions, feature_importance, metrics, mc_results) = load_run_data(ticker, selected_model)
+                return build_dashboard_content(ticker, df_features, test_df, predictions, feature_importance, metrics, mc_results)
+            except Exception as e:
+                logger.exception(f"Error updating dashboard for {selected_model}")
+                return html.Div(f"An error occurred while loading data for {selected_model}: {e}", className="alert alert-danger")
 
-        # 3. Run the Dash server
-        print(f"Launching dashboard for {args.ticker.upper()}. Open http://127.0.0.1:8050 in your browser.")
+        print(f"Launching dashboard for {ticker}. Open http://127.0.0.1:8050 in your browser.")
         app.run(debug=True)
-
-    except (FileNotFoundError, ValueError) as e:
-        print(f"ERROR: {e}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        logger.exception("Dashboard launch failed.")
