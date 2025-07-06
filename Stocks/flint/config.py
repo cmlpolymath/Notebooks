@@ -37,7 +37,7 @@ TRANSFORMER_PARAMS = {
 # Transformer Training Configuration
 TRANSFORMER_TRAINING = {
     'lr': 0.0001,
-    'batch_size': 64,
+    'batch_size': 256, # MODIFIED: Increased from 64 for faster GPU utilization
     'epochs': 50
 }
 

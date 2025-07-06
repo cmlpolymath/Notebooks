@@ -59,7 +59,15 @@ def main():
 
             # Step 3: Prepare data for models
             df_model = df_features.copy()
-            df_model['UpNext'] = (df_model['Close'].shift(-1) > df_model['Close']).astype(int)
+            
+            # --- MODIFIED: NEW, MORE ROBUST TARGET DEFINITION ---
+            # The target is 1 if the price 5 days from now is above the 20-day MA at that future time.
+            # This is a much more stable signal than next-day prediction.
+            future_price = df_model['Close'].shift(-5)
+            future_ma = df_model['Close'].rolling(20).mean().shift(-5)
+            df_model['UpNext'] = (future_price > future_ma).astype(int)
+            
+            # This correctly drops rows at the end where the future target is unknown
             df_model.dropna(inplace=True)
 
             train_size = int(len(df_model) * config.TRAIN_SPLIT_RATIO)
@@ -121,6 +129,7 @@ def main():
                 shap_importance={'features': feature_cols, 'values': shap_values.tolist()}
             )
             print(f"Analysis for {ticker} using {model_name} complete. Results logged.")
+            print(f"Final Accuracy: {accuracy:.2%}") # ADDED: Print final accuracy
 
         except Exception as e:
             print(f"!!! FAILED to process {ticker}: {e}")

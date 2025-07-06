@@ -1,0 +1,41 @@
+Script started on 2025-07-05 16:21:58+00:00 [TERM="xterm-256color" TTY="/dev/pts/8" COLUMNS="-1" LINES="-1"]
+Audit database ready at 'results/audit_log.duckdb'
+
+========================= Processing Ticker: RYCEY =========================
+Found cached data for RYCEY at 'data/RYCEY.parquet'
+Updating data for RYCEY from 2025-07-04 to 2025-07-05...
+
+1 Failed download:
+['RYCEY']: YFPricesMissingError('possibly delisted; no price data found  (1d 2025-07-04 -> 2025-07-05)')
+No new data found for RYCEY for the period.
+
+--- Generating Monte-Carlo Signal (Once per Ticker) ---
+MonteCarloTrendFilter using device: cuda
+/workspaces/smart_dev/ml-unified/.venv/lib/python3.11/site-packages/sklearn/gaussian_process/kernels.py:450: ConvergenceWarning: The optimal value found for dimension 0 of parameter k1__length_scale is close to the specified upper bound 100000.0. Increasing the bound and calling fit again may find a better value.
+  warnings.warn(
+  0%|                                                                                                               | 0/506 [00:00<?, ?it/s]  5%|████▊                                                                                                 | 24/506 [00:05<01:58,  4.08it/s]  7%|███████▎                                                                                              | 36/506 [00:06<01:10,  6.68it/s] 21%|█████████████████████▌                                                                               | 108/506 [00:06<00:13, 29.47it/s]100%|█████████████████████████████████████████████████████████████████████████████████████████████████████| 506/506 [00:06<00:00, 80.56it/s]
+MC Signal: Trend Strength=1.039
+
+--- Training XGBoost component ---
+Training XGBoost model...
+Calculating SHAP values...
+XGBoost training complete.
+
+--- Training Transformer component ---
+Training Transformer model...
+Using device: cuda
+Model compiled successfully with 'aot_eager' backend.
+/workspaces/smart_dev/projects/Notebooks/Stocks/flint/models.py:131: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler_amp = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
+Epoch 10/50 - Training Loss: 0.485702
+Epoch 20/50 - Training Loss: 0.440339
+Epoch 30/50 - Training Loss: 0.397554
+Epoch 40/50 - Training Loss: 0.356707
+Epoch 50/50 - Training Loss: 0.317244
+Transformer training complete.
+
+--- Creating Ensemble Prediction ---
+Analysis for RYCEY using Ensemble_v1 complete. Results logged.
+Final Accuracy: 56.45%
+
+Script done on 2025-07-05 16:26:51+00:00 [COMMAND_EXIT_CODE="0"]
