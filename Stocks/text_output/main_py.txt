@@ -443,7 +443,7 @@ else:
 
 print("Fuzzy Verdict for the latest day:", verdict)
 
-df.index = pd.to_datetime(df['Date'])
+# df.index = pd.to_datetime(df['Date'])
 
 # fig = make_subplots(rows=1, cols=2)
 # 7.1 Price chart with predicted buy/sell signals

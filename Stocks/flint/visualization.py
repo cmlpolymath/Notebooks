@@ -195,8 +195,8 @@ def plot_mc_distribution(mc_results: dict) -> go.Figure:
     """Creates a histogram of the Monte Carlo simulated trend slopes."""
     try:
         slopes = mc_results.get("simulated_slopes")
-        if slopes is None or len(slopes) == 0:
-            raise ValueError("No simulated slopes found in Monte Carlo results.")
+        if slopes is None or not isinstance(slopes, list) or len(slopes) == 0:
+            raise ValueError("No valid simulated slopes found in Monte Carlo results.")
 
         fig = go.Figure(data=[go.Histogram(x=slopes, nbinsx=50, name="Distribution")])
         
@@ -227,7 +227,7 @@ def get_available_models(ticker: str) -> list:
     con = duckdb.connect(str(db_path), read_only=True)
     try:
         models_df = con.execute(
-            "SELECT DISTINCT model_name FROM analysis_results WHERE ticker = ? ORDER BY model_name",
+            "SELECT DISTINCT model_name FROM analysis_results WHERE ticker = ? ORDER BY model_name DESC",
             [ticker]
         ).fetchdf()
         return models_df['model_name'].tolist()
@@ -266,7 +266,7 @@ def build_dashboard_content(ticker, df_features, test_df, predictions, feature_i
 
     kelly = metrics.get("kelly_fraction", 0.0)
     accuracy = metrics.get("accuracy", 0.0)
-    mc_strength = metrics.get("mc_trend_strength", 0.0)
+    mc_strength = metrics.get("trend_strength", 0.0) # Corrected key
     verdict = get_fuzzy_verdict(kelly)
 
     return html.Div([
@@ -313,29 +313,38 @@ def load_run_data(ticker: str, model_name: str):
     
     print("Re-generating feature data for plotting...")
     df_raw = data_handler.get_stock_data(ticker=ticker, start_date=config.START_DATE, end_date=config.END_DATE)
-    df_raw['Date'] = pd.to_datetime(df_raw['Date'])
-    df_raw.set_index('Date', inplace=True)
+    market_df = data_handler.get_stock_data(ticker=config.MARKET_INDEX_TICKER, start_date=config.START_DATE, end_date=config.END_DATE)
     
-    df_features = FeatureCalculator(df_raw).add_all_features()
+    # --- THE FIX IS HERE ---
+    # Do NOT set the index before passing to FeatureCalculator.
+    # It expects 'Date' to be a column.
+    
+    df_features = FeatureCalculator(df_raw).add_all_features(market_df=market_df)
+    
+    # Now that features are calculated, set the index for plotting and slicing.
+    df_features['Date'] = pd.to_datetime(df_features['Date'])
+    df_features.set_index('Date', inplace=True)
     
     # Recreate the train/test split to find the index for plotting signals
     df_model = df_features.copy()
-    df_model['UpNext'] = (df_model['Close'].shift(-1) > df_model['Close']).astype(int)
+    
+    future_price = df_model['Close'].shift(-5)
+    future_ma = df_model['Close'].rolling(20).mean().shift(-5)
+    df_model['UpNext'] = (future_price > future_ma).astype(int)
     df_model.dropna(inplace=True)
     
     train_size = int(len(df_model) * config.TRAIN_SPLIT_RATIO)
+    test_df = df_model.iloc[train_size:]
     
-    if 'Transformer' in model_name:
-        # For transformer, the test set starts after the sequence window offset
-        offset = config.SEQUENCE_WINDOW_SIZE - 1
-        test_df = df_model.iloc[train_size + offset:]
-    else:
-        test_df = df_model.iloc[train_size:]
+    num_predictions = len(predictions_data.get('probabilities', []))
+    test_df_for_signals = test_df.iloc[-num_predictions:]
 
     binary_predictions = pd.Series([1 if p > 0.5 else 0 for p in predictions_data.get('probabilities', [])])
-    mc_results = {"simulated_slopes": metrics.get("mc_simulated_slopes")}
+    
+    mc_results = {k: v for k, v in metrics.items() if 'simulated_slopes' in k}
 
-    return df_features, test_df, binary_predictions, feature_importance, metrics, mc_results
+    return df_features, test_df_for_signals, binary_predictions, feature_importance, metrics, mc_results
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Launch the interactive stock analysis dashboard.")

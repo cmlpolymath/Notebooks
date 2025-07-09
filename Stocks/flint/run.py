@@ -1,5 +1,6 @@
 # run.py
 import initialize
+import time
 import argparse
 import re
 import time
@@ -9,11 +10,10 @@ import torch
 
 # Import project modules
 import config
-import data_handler
 import audit_logger
-from feature_engineering import FeatureCalculator
 import models
 import predictors
+from preprocess import prepare_and_cache_data
 
 def validate_ticker(ticker):
     """Sanitize and validate a stock ticker format."""
@@ -33,17 +33,18 @@ def main():
     for ticker in args.tickers:
         print(f"\n{'='*25} Processing Ticker: {ticker} {'='*25}")
         try:
-            # Step 1: Load and prepare data ONCE per ticker
-            df_raw = data_handler.get_stock_data(ticker=ticker, start_date=config.START_DATE, end_date=config.END_DATE)
-            if df_raw is None or len(df_raw) < 350:
-                print(f"Insufficient data for {ticker} (need ~350 days). Skipping.")
-                continue
+            # Step 1: Load pre-processed and cached data
+            # This function will either load from cache or create it if it doesn't exist.
+            data_package = prepare_and_cache_data(ticker, config.START_DATE, config.END_DATE)
             
-            feature_calculator = FeatureCalculator(df_raw.copy())
-            df_features = feature_calculator.add_all_features()
-            df_features.replace([np.inf, -np.inf], np.nan, inplace=True)
-            df_features.dropna(inplace=True)
-
+            # Unpack the data
+            X_train = data_package['X_train']
+            y_train = data_package['y_train']
+            X_test = data_package['X_test']
+            y_test_orig = data_package['y_test_orig']
+            feature_cols = data_package['feature_cols']
+            df_features = data_package['df_features']
+            
             # Step 2: Run Monte Carlo simulation ONCE per ticker
             print("\n--- Generating Monte-Carlo Signal (Once per Ticker) ---")
             mc_final_signal = {}
@@ -57,45 +58,37 @@ def main():
                 import traceback
                 traceback.print_exc()
 
-            # Step 3: Prepare data for models
-            df_model = df_features.copy()
-            
-            # --- MODIFIED: NEW, MORE ROBUST TARGET DEFINITION ---
-            # The target is 1 if the price 5 days from now is above the 20-day MA at that future time.
-            # This is a much more stable signal than next-day prediction.
-            future_price = df_model['Close'].shift(-5)
-            future_ma = df_model['Close'].rolling(20).mean().shift(-5)
-            df_model['UpNext'] = (future_price > future_ma).astype(int)
-            
-            # This correctly drops rows at the end where the future target is unknown
-            df_model.dropna(inplace=True)
-
-            train_size = int(len(df_model) * config.TRAIN_SPLIT_RATIO)
-            train_df = df_model.iloc[:train_size]
-            test_df = df_model.iloc[train_size:]
-
-            feature_cols = [col for col in config.FEATURE_COLS if col in df_model.columns]
-            X_train, y_train = train_df[feature_cols], train_df['UpNext']
-            X_test, y_test_orig = test_df[feature_cols], test_df['UpNext']
-
-            # Step 4: Train XGBoost and get its probabilities and SHAP values
+            # Step 3: Train XGBoost and get its probabilities and SHAP values
             print("\n--- Training XGBoost component ---")
             xgb_model = models.train_xgboost(X_train, y_train)
             xgb_proba = xgb_model.predict_proba(X_test)[:, 1]
             shap_values = models.get_shap_importance(xgb_model, X_test)
             print("XGBoost training complete.")
 
-            # Step 5: Train Transformer and get its probabilities
-            print("\n--- Training Transformer component ---")
-            if len(df_model) < config.SEQUENCE_WINDOW_SIZE + 100:
+            # --- MODIFIED: Feature Reduction based on SHAP ---
+            print("\n--- Identifying Top Features for Transformer ---")
+            shap_series = pd.Series(shap_values, index=feature_cols)
+            top_12_features = shap_series.nlargest(12).index.tolist()
+            print(f"Selected Top 12 Features: {top_12_features}")
+            
+            X_train_reduced = X_train[top_12_features]
+            X_test_reduced = X_test[top_12_features]
+
+            # Step 4: Train Transformer on the REDUCED feature set
+            print("\n--- Training Transformer component on reduced feature set ---")
+            if len(X_train_reduced) < config.SEQUENCE_WINDOW_SIZE + 50: # Check against training data length
                 print("Skipping Transformer: Insufficient data. Ensemble will not be created.")
                 continue
             
-            trans_model, device, scaler, y_seq_test = models.train_transformer(X_train.values, y_train.values, X_test.values, y_test_orig.values)
-            trans_proba = models.predict_transformer(trans_model, device, scaler, X_test.values)[:, 1]
+            trans_model, device, scaler, y_seq_test = models.train_transformer(
+                X_train_reduced.values, y_train.values, X_test_reduced.values, y_test_orig.values
+            )
+            trans_proba = models.predict_transformer(
+                trans_model, device, scaler, X_test_reduced.values
+            )[:, 1]
             print("Transformer training complete.")
 
-            # Step 6: Create the Ensemble prediction
+            # Step 5: Create the Ensemble prediction
             print("\n--- Creating Ensemble Prediction ---")
             min_len = min(len(xgb_proba), len(trans_proba))
             ensemble_proba = (xgb_proba[:min_len] + trans_proba[:min_len]) / 2
@@ -104,7 +97,7 @@ def main():
             # The transformer's test labels (y_seq_test) are the correct length
             y_test_final = y_seq_test
 
-            # Step 7: Calculate final metrics and log the ENSEMBLE result
+            # Step 6: Calculate final metrics and log the ENSEMBLE result
             predictions = (ensemble_proba > 0.5).astype(int)
             accuracy = np.mean(predictions == y_test_final) if len(y_test_final) > 0 else 0.0
             kelly_fraction = 2 * ensemble_proba[-1] - 1 if len(ensemble_proba) > 0 else 0.0
@@ -115,9 +108,13 @@ def main():
                 **mc_final_signal
             }
             
-            # The final model name is "Ensemble_v1"
-            model_name = "Ensemble_v1"
-            run_config = {"XGBoost": config.XGB_PARAMS, "Transformer": {**config.TRANSFORMER_PARAMS, **config.TRANSFORMER_TRAINING}}
+            # The final model name is "Ensemble_v2" to reflect changes
+            model_name = "Ensemble_v2"
+            run_config = {
+                "XGBoost": config.XGB_PARAMS, 
+                "Transformer": {**config.TRANSFORMER_PARAMS, **config.TRANSFORMER_TRAINING},
+                "Feature_Reduction": {"method": "SHAP", "n_features": 12}
+            }
 
             audit_logger.log_analysis_result(
                 ticker=ticker, 
@@ -129,7 +126,7 @@ def main():
                 shap_importance={'features': feature_cols, 'values': shap_values.tolist()}
             )
             print(f"Analysis for {ticker} using {model_name} complete. Results logged.")
-            print(f"Final Accuracy: {accuracy:.2%}") # ADDED: Print final accuracy
+            print(f"Final Accuracy: {accuracy:.2%}")
 
         except Exception as e:
             print(f"!!! FAILED to process {ticker}: {e}")
@@ -138,4 +135,7 @@ def main():
             continue
 
 if __name__ == '__main__':
+    start = time.perf_counter()
     main()
+    end = time.perf_counter()
+    print(f"Execution time: {end - start:.6f} seconds")

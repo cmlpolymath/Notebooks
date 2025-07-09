@@ -56,27 +56,21 @@ class JumpNetwork(nn.Module):
         seq_len, feature_dim = input_shape
         num_heads = 4
         
-        # --- FIX ---
-        # Project the input feature_dim (which is 1) to a dimension
-        # that is divisible by num_heads. Let's use 8.
         self.projected_dim = 8
         self.input_projection = nn.Linear(feature_dim, self.projected_dim)
         
-        # Now, use the projected_dim for the MultiheadAttention layer
         self.attn = nn.MultiheadAttention(embed_dim=self.projected_dim, num_heads=num_heads, batch_first=True)
         self.norm = nn.LayerNorm(self.projected_dim)
         
         self.vol_dense = nn.Linear(seq_len, 16)
         self.softplus = nn.Softplus()
         
-        # The merged size now uses the projected_dim
         merged_size = self.projected_dim + 16
         
         self.jump_prob_head = nn.Sequential(nn.Linear(merged_size, 1), nn.Sigmoid())
         self.jump_size_head = nn.Linear(merged_size, 2)
 
     def forward(self, price_seq, vol_seq):
-        # Apply the input projection first
         projected_price_seq = self.input_projection(price_seq)
         
         attn_out, _ = self.attn(projected_price_seq, projected_price_seq, projected_price_seq)
@@ -176,7 +170,18 @@ class MonteCarloTrendFilter:
 
     def _optimize_gbm_params(self, close):
         returns = np.log(close/close.shift(1)).dropna().values
-        gpr = GaussianProcessRegressor(kernel=RBF(1.0) + WhiteKernel(1.0), n_restarts_optimizer=5)
+        
+        # --- THE FIX IS HERE ---
+        # Define a kernel with expanded bounds for the length_scale parameter
+        # to prevent the ConvergenceWarning. We are telling the model it's okay
+        # to search for an even smoother function fit.
+        kernel = RBF(length_scale=1.0, length_scale_bounds=(1e-5, 1e8)) + WhiteKernel(noise_level=1.0)
+        
+        gpr = GaussianProcessRegressor(
+            kernel=kernel, 
+            n_restarts_optimizer=5
+        )
+        
         X = np.arange(len(returns)).reshape(-1,1)
         gpr.fit(X, returns)
         return np.mean(gpr.predict(X)), np.std(returns)

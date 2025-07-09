@@ -14,7 +14,7 @@ class FeatureCalculator:
             if pd.api.types.is_numeric_dtype(self.df[col]):
                 self.df[col].values.flags.writeable = True
 
-    def add_all_features(self):
+    def add_all_features(self, market_df: pd.DataFrame | None = None):
         """Orchestrator method to add all features."""
         self._add_rsi()
         self._add_macd()
@@ -29,7 +29,12 @@ class FeatureCalculator:
         self._add_garch_vol()
         self._add_returns()
         self._add_dominant_period()
-        # self._add_fractal_dimension()
+        self._add_kalman_filter()
+        
+        # ADDED: Incorporate market context features if provided
+        if market_df is not None:
+            self._add_spy_rsi(market_df)
+            self._add_spy_return(market_df)
         
         self.df.dropna(inplace=True)
         return self.df
@@ -50,8 +55,6 @@ class FeatureCalculator:
         self.df['MACD_line'] = ema1 - ema2
         self.df['MACD_signal'] = self.df['MACD_line'].ewm(span=signal_span, adjust=False).mean()
         self.df['MACD_hist'] = self.df['MACD_line'] - self.df['MACD_signal']
-
-    # ... and so on for all your other indicators ...
 
     def _add_atr(self, period=14):
         high_low = self.df['High'] - self.df['Low']
@@ -171,6 +174,57 @@ class FeatureCalculator:
 
         self.df['Dominant_Period'] = smooth
 
+    def _align_and_join(self, feature_series: pd.Series):
+        """Helper to safely join a feature series based on the 'Date' column."""
+        # Ensure both dataframes have a 'Date' index for joining
+        if 'Date' not in self.df.columns or 'Date' not in feature_series.index.names:
+             self.df.set_index('Date', inplace=True)
+             if 'Date' not in self.df.index.name: # Handle MultiIndex case
+                 self.df.index.names = ['Date' if name is None else name for name in self.df.index.names]
+
+        # Join and reset index to keep 'Date' as a column
+        self.df = self.df.join(feature_series, on='Date')
+
+
+    def _add_spy_rsi(self, market_df: pd.DataFrame, period=14):
+        """Calculates RSI for the market index and merges it."""
+        market_df_c = market_df.copy()
+        # Ensure 'Date' is a datetime column for merging
+        market_df_c['Date'] = pd.to_datetime(market_df_c['Date'])
+        
+        # Set index for calculation, but don't modify the original
+        market_df_calc = market_df_c.set_index('Date')
+
+        delta = market_df_calc['Close'].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+        rs = avg_gain / (avg_loss + 1e-9)
+        spy_rsi = 100 - (100 / (1 + rs))
+        spy_rsi.name = 'SPY_RSI14'
+        
+        # Align and merge using the 'Date' column
+        self.df['Date'] = pd.to_datetime(self.df['Date'])
+        self.df = self.df.merge(spy_rsi, on='Date', how='left')
+
+    # --- MODIFIED: _add_spy_return ---
+    def _add_spy_return(self, market_df: pd.DataFrame):
+        """Calculates daily return for the market index and merges it."""
+        market_df_c = market_df.copy()
+        # Ensure 'Date' is a datetime column for merging
+        market_df_c['Date'] = pd.to_datetime(market_df_c['Date'])
+        
+        # Set index for calculation, but don't modify the original
+        market_df_calc = market_df_c.set_index('Date')
+
+        spy_return = market_df_calc['Close'].pct_change().fillna(0) * 100
+        spy_return.name = 'SPY_Return1'
+        
+        # Align and merge using the 'Date' column
+        self.df['Date'] = pd.to_datetime(self.df['Date'])
+        self.df = self.df.merge(spy_return, on='Date', how='left')
+
     # def _add_fractal_dimension(x, kmax=10):
     #     """Compute Higuchi Fractal Dimension for 1D array x."""
     #     N = len(x)
@@ -212,23 +266,36 @@ class FeatureCalculator:
     #     # Store as pandas Series in metrics
     #     self.df['fractal_dim'] = pd.Series(fractal_dim_vals, index=self.df.index)
 
-    # def kalman_filter(series, Q=1e-5, R=1e-2, initial_var=1.0):
-    #     """Apply 1D Kalman filter on price series. Returns filtered series."""
-    #     n = len(series)
-    #     filtered = np.zeros(n)
-    #     # Initial estimates
-    #     filtered[0] = series[0]
-    #     P = initial_var  # initial estimate covariance
-    #     for t in range(1, n):
-    #         # Time update (predict)
-    #         x_pred = filtered[t-1]        # predicted state = previous state (random walk)
-    #         P_pred = P + Q                # predicted covariance
-    #         # Measurement update (correct)
-    #         K = P_pred / (P_pred + R)     # Kalman gain
-    #         filtered[t] = x_pred + K * (series[t] - x_pred)  # update estimate
-    #         P = (1 - K) * P_pred          # update covariance
-    #     return filtered
+    def _add_kalman_filter(self, Q=1e-5, R=1e-2):
+        """
+        Applies a 1D Kalman filter to the 'Close' price to estimate the
+        true underlying value, creating a smoothed price series.
+        """
+        def _kalman_filter_internal(series, Q, R):
+            n = len(series)
+            filtered = np.zeros(n)
+            P = np.zeros(n)
+            
+            # Initial estimates
+            filtered[0] = series[0]
+            P[0] = 1.0  # initial estimate covariance
+            
+            for t in range(1, n):
+                # Time update (predict)
+                x_pred = filtered[t-1]
+                P_pred = P[t-1] + Q
+                
+                # Measurement update (correct)
+                K = P_pred / (P_pred + R)
+                filtered[t] = x_pred + K * (series[t] - x_pred)
+                P[t] = (1 - K) * P_pred
+            return filtered
 
-    #     # Compute filtered close series for primary ticker
-    #     filtered_close = kalman_filter(self.df['Close'].values)
-    #     self.df['kalman_filtered_close'] = pd.Series(filtered_close, index=self.df.index)
+        # Ensure we are working with a numpy array
+        close_prices = self.df['Close'].values
+        
+        # Apply the filter
+        filtered_close = _kalman_filter_internal(close_prices, Q, R)
+        
+        # Assign the result back to the DataFrame
+        self.df['Kalman_Close'] = pd.Series(filtered_close, index=self.df.index)

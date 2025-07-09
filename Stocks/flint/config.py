@@ -4,14 +4,17 @@ from datetime import datetime, timedelta
 # --- Data Configuration ---
 START_DATE = (datetime.today() - timedelta(days=365*10)).strftime('%Y-%m-%d')
 END_DATE = datetime.today().strftime('%Y-%m-%d')
+MARKET_INDEX_TICKER = 'SPY' # Added for market context
 
 # --- Feature Configuration ---
 # List of feature columns to be used by the models
+# ADDED: SPY_RSI14 and SPY_Return1 for market context
 FEATURE_COLS = [
     'RSI14', 'MACD_line', 'MACD_signal', 'MACD_hist', 'ATR14',
     'BB_mid', 'BB_upper', 'BB_lower', 'OBV', '%K', '%D',
     'MFI14', 'CCI20', 'Williams_%R', 'ROC10', 'GARCH_vol',
     'Dominant_Period', 'Return1', 'Close', 'Volume',
+    'SPY_RSI14', 'SPY_Return1'
 ]
 
 # --- Model Configuration ---
@@ -37,8 +40,9 @@ TRANSFORMER_PARAMS = {
 # Transformer Training Configuration
 TRANSFORMER_TRAINING = {
     'lr': 0.0001,
-    'batch_size': 256, # MODIFIED: Increased from 64 for faster GPU utilization
-    'epochs': 50
+    'batch_size': 256,
+    'epochs': 50,
+    'patience': 5 # ADDED: Early stopping patience
 }
 
 # Advanced Monte Carlo Predictor Parameters

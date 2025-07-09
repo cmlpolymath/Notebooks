@@ -1,0 +1,8 @@
+__pycache__
+.ruff_cache
+results/*
+*.csv
+*.txt
+data/*
+text_output/*
+*.duckdb

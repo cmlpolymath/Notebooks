@@ -15,7 +15,7 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
 
 def get_stock_data(ticker: str, start_date: str, end_date: str, force_redownload: bool = False) -> pd.DataFrame | None:
     """
-    Fetch stock data intelligently.
+    Fetch stock data intelligently for any ticker (e.g., 'AAPL', 'SPY').
     1. Reads existing data from Parquet.
     2. Fetches only the missing data since the last entry.
     3. Appends and saves back to Parquet.
