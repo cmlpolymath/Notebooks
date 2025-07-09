@@ -174,8 +174,8 @@ graph TD
     M -- Writes to --> N((results/audit_log.duckdb));
     O[visualization.py] -- Reads from --> N;
 
-    style D fill:#f9f,stroke:#333,stroke-width:2px
-    style N fill:#f9f,stroke:#333,stroke-width:2px
+    style D fill:#571957,stroke:#333,stroke-width:2px
+    style N fill:#571957,stroke:#333,stroke-width:2px
 ```
 
 ---
