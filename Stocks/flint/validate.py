@@ -11,6 +11,7 @@ import torch
 # Import project modules
 import config
 import models
+import data_handler
 from preprocess import prepare_and_cache_data
 from feature_engineering import FeatureCalculator # ADDED to re-run feature engineering on filtered data
 
@@ -31,22 +32,43 @@ def run_walk_forward_validation(ticker: str, years: int, model_type: str):
         end_date = datetime.today()
         start_date = end_date - timedelta(days=365 * years)
         
-        print(f"Loading data from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}...")
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
+        print(f"Loading data from {start_str} to {end_str}...")
         
-        df_raw = data_handler.get_stock_data(ticker, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-        market_df = data_handler.get_stock_data(config.MARKET_INDEX_TICKER, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+        df_raw = data_handler.get_stock_data(ticker, start_str, end_str)
+        market_df = data_handler.get_stock_data(config.MARKET_INDEX_TICKER, start_str, end_str)
 
-        if df_raw is None or market_df is None or len(df_raw) < 252: # Need at least a year of data
+        if df_raw is None or market_df is None or len(df_raw) < 252:
             raise ValueError("Insufficient data for the specified period.")
+
+        # --- ADDED: Load Sector and Macro Data for validation period ---
+        sector_df = None
+        try:
+            info = data_handler.get_ticker_info(ticker)
+            sector = info.get('sector')
+            if sector and sector in config.SECTOR_ETF_MAP:
+                sector_ticker = config.SECTOR_ETF_MAP[sector]
+                sector_df = data_handler.get_stock_data(sector_ticker, start_str, end_str)
+        except Exception as e:
+            print(f"Warning: Failed to load sector data during validation. Error: {e}")
+
+        macro_dfs = {}
+        for name, macro_ticker in config.MACRO_TICKERS.items():
+            macro_dfs[name] = data_handler.get_stock_data(macro_ticker, start_str, end_str)
 
         # Re-run feature engineering on the filtered data
         feature_calculator = FeatureCalculator(df_raw.copy())
-        df_features = feature_calculator.add_all_features(market_df=market_df.copy())
+        df_features = feature_calculator.add_all_features(
+            market_df=market_df.copy() if market_df is not None else None,
+            sector_df=sector_df.copy() if sector_df is not None else None,
+            macro_dfs=macro_dfs
+        )
         
         # Define the target variable
-        future_price = df_features['Close'].shift(-5)
-        future_ma = df_features['Close'].rolling(20).mean().shift(-5)
         df_model = df_features.copy()
+        future_price = df_model['Close'].shift(-5)
+        future_ma = df_model['Close'].rolling(20).mean().shift(-5)
         df_model['UpNext'] = (future_price > future_ma).astype(int)
         df_model.dropna(inplace=True)
 
@@ -56,13 +78,12 @@ def run_walk_forward_validation(ticker: str, years: int, model_type: str):
 
     # 2. Define Walk-Forward Parameters
     n = len(df_model)
-    initial_train_size = int(n * 0.50) # Start with 50% of data for initial training
-    validation_size = int(n * 0.15)    # Use 15% for the validation set in each fold
-    step_size = int(n * 0.05)          # Step forward by 5% of the data each time
+    initial_train_size = int(n * 0.50)
+    validation_size = int(n * 0.15)
+    step_size = int(n * 0.05)
     
-    # Adjust validation size for non-transformer models which don't need it for early stopping
     if model_type in ['rf', 'xgb']:
-        initial_train_size += validation_size # Fold validation set into training
+        initial_train_size += validation_size
         validation_size = 0
 
     if initial_train_size + step_size > n:
@@ -81,7 +102,6 @@ def run_walk_forward_validation(ticker: str, years: int, model_type: str):
         fold_num += 1
         print(f"\n--- Processing Fold {fold_num} ---")
 
-        # Define indices for this fold
         train_end_idx = start_idx + initial_train_size
         val_end_idx = train_end_idx + validation_size
         test_end_idx = val_end_idx + step_size
@@ -91,8 +111,6 @@ def run_walk_forward_validation(ticker: str, years: int, model_type: str):
         
         X_train, y_train = train_df[feature_cols], train_df['UpNext']
         X_test, y_test = test_df[feature_cols], test_df['UpNext']
-        
-        # --- Model-Specific Training and Prediction ---
         
         if model_type == 'rf':
             print("Training Random Forest model...")
@@ -140,11 +158,8 @@ def run_walk_forward_validation(ticker: str, years: int, model_type: str):
         else:
             raise ValueError(f"Invalid model_type: {model_type}. Choose 'rf', 'xgb', or 'tf'.")
 
-        # --- Store results for this fold ---
         all_preds.extend(predictions.tolist())
         all_true.extend(y_test_aligned.tolist())
-
-        # Move to the next fold
         start_idx += step_size
 
     # 4. Report Final, Aggregated Metrics
@@ -181,8 +196,4 @@ if __name__ == '__main__':
                              "  'tf'  - Transformer Ensemble")
     
     args = parser.parse_args()
-
-    # Import data_handler here to avoid circular dependency issues if it were at the top
-    # and to ensure it's imported after initialize.py has run.
-    import data_handler
     run_walk_forward_validation(args.ticker, args.years, args.model_type)

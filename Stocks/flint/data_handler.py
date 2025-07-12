@@ -3,6 +3,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
+import re
 
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -13,6 +14,25 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
         df.columns = df.columns.get_level_values(0)
     return df
 
+# Sanitize ticker for safe filenames
+def sanitize_ticker_for_filename(ticker: str) -> str:
+    """Replaces special characters in a ticker with underscores for safe filenames."""
+    return re.sub(r'[^A-Z0-9_]', '_', ticker.upper())
+
+# ADDED: Function to get fundamental info for a ticker
+def get_ticker_info(ticker: str) -> dict:
+    """
+    Fetches the .info dictionary for a given ticker.
+    A simple wrapper around yfinance.Ticker().info.
+    """
+    try:
+        tkr = yf.Ticker(ticker)
+        # .info can be slow; this is a basic example. Caching could be added.
+        return tkr.info
+    except Exception as e:
+        print(f"Could not fetch info for {ticker}: {e}")
+        return {}
+
 def get_stock_data(ticker: str, start_date: str, end_date: str, force_redownload: bool = False) -> pd.DataFrame | None:
     """
     Fetch stock data intelligently for any ticker (e.g., 'AAPL', 'SPY').
@@ -21,7 +41,10 @@ def get_stock_data(ticker: str, start_date: str, end_date: str, force_redownload
     3. Appends and saves back to Parquet.
     """
     Path('data').mkdir(exist_ok=True)
-    parquet_path = Path(f'data/{ticker}.parquet')
+
+    # Use sanitized ticker for the filename
+    safe_ticker = sanitize_ticker_for_filename(ticker)
+    parquet_path = Path(f'data/{safe_ticker}.parquet')
     
     if force_redownload and parquet_path.exists():
         print(f"Forcing redownload for {ticker}. Deleting cache at '{parquet_path}'.")

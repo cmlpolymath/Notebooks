@@ -1,4 +1,4 @@
-# Finance-Limited INTelligence
+# Finance-Leveraged INTelligence
 
 ## Whitepaper: The "Flint" Algorithmic Analysis Pipeline
 

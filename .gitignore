@@ -1,8 +1,9 @@
 __pycache__
 .ruff_cache
+**/*.venv/
 results/*
-*.csv
-*.txt
-data/*
-text_output/*
-*.duckdb
+**/*.csv
+**/*.txt
+**/data/
+**/text_output/
+**/*.duckdb

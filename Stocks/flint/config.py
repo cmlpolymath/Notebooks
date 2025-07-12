@@ -6,16 +6,46 @@ START_DATE = (datetime.today() - timedelta(days=365*10)).strftime('%Y-%m-%d')
 END_DATE = datetime.today().strftime('%Y-%m-%d')
 MARKET_INDEX_TICKER = 'SPY' # Added for market context
 
+# ADDED: Mapping of yfinance sectors to representative ETFs
+SECTOR_ETF_MAP = {
+    'Technology': 'XLK',
+    'Communication Services': 'XLC',
+    'Healthcare': 'XLV',
+    'Financials': 'XLF',
+    'Industrials': 'XLI',
+    'Consumer Discretionary': 'XLY',
+    'Consumer Staples': 'XLP',
+    'Energy': 'XLE',
+    'Utilities': 'XLU',
+    'Real Estate': 'XLRE',
+    'Basic Materials': 'XLB'
+}
+
+# ADDED: Tickers for macroeconomic indicators from yfinance
+MACRO_TICKERS = {
+    'VIX': '^VIX',             # Volatility Index
+    '10Y_Treasury': '^TNX',    # 10-Year Treasury Yield
+    'Crude_Oil': 'CL=F',       # Crude Oil Futures
+    'Gold': 'GC=F'             # Gold Futures
+}
+
 # --- Feature Configuration ---
 # List of feature columns to be used by the models
 # ADDED: SPY_RSI14 and SPY_Return1 for market context
+# ADDED: Sector and Macroeconomic features
 FEATURE_COLS = [
     'RSI14', 'MACD_line', 'MACD_signal', 'MACD_hist', 'ATR14',
     'BB_mid', 'BB_upper', 'BB_lower', 'OBV', '%K', '%D',
     'MFI14', 'CCI20', 'Williams_%R', 'ROC10', 'GARCH_vol',
     'Dominant_Period', 'Return1', 'Close', 'Volume',
-    'SPY_RSI14', 'SPY_Return1'
+    'Kal_filter', 'Realized_Vol', 'Hurst_Exponent',
+    'Fractal_Dimension', 'Wavelet_Ratio', 'Efficiency_Ratio',
+    'VWAP_zscore',
+    'SPY_RSI14', 'SPY_Return1', # Market context features
+    'SECTOR_RSI14', 'SECTOR_Return1', # Sector features
+    'VIX', '10Y_Treasury', 'Crude_Oil', 'Gold' # Macro features
 ]
+
 
 # --- Model Configuration ---
 # Train/Test Split

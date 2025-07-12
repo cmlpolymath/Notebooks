@@ -170,11 +170,7 @@ class MonteCarloTrendFilter:
 
     def _optimize_gbm_params(self, close):
         returns = np.log(close/close.shift(1)).dropna().values
-        
-        # --- THE FIX IS HERE ---
-        # Define a kernel with expanded bounds for the length_scale parameter
-        # to prevent the ConvergenceWarning. We are telling the model it's okay
-        # to search for an even smoother function fit.
+
         kernel = RBF(length_scale=1.0, length_scale_bounds=(1e-5, 1e8)) + WhiteKernel(noise_level=1.0)
         
         gpr = GaussianProcessRegressor(
@@ -200,7 +196,8 @@ class MonteCarloTrendFilter:
         return self
 
     def predict(self, horizon=21):
-        if not self._is_fitted: raise RuntimeError("Call fit() first")
+        if not self._is_fitted:
+            raise RuntimeError("Call fit() first")
         
         dt = 1.0
         state_vol = np.std(np.log(self.close_[-self.jump_window:] / self.close_[-self.jump_window-1:-1]))
@@ -214,7 +211,8 @@ class MonteCarloTrendFilter:
         )
         
         slopes = [s for s in slopes if not np.isnan(s)]
-        if not slopes: return {'up_prob': 0.5, 'down_prob': 0.5, 'trend_strength': 0.0, 'ci': [0,0], 'n_sims': n_sims, 'simulated_slopes': []}
+        if not slopes:
+            return {'up_prob': 0.5, 'down_prob': 0.5, 'trend_strength': 0.0, 'ci': [0,0], 'n_sims': n_sims, 'simulated_slopes': []}
 
         up_prob = np.mean(np.array(slopes) > 0)
         down_prob = np.mean(np.array(slopes) < 0)
@@ -232,7 +230,6 @@ class MonteCarloTrendFilter:
             'simulated_slopes': slopes
         }
 
-# This standalone function for parallel execution does not need to change
 def _run_single_simulation(seed, S0, gbm_params, jump_params, horizon, dt):
     np.random.seed(seed)
     mu, sigma = gbm_params

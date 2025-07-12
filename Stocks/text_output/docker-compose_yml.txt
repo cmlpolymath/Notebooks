@@ -4,10 +4,11 @@
 services:
   smart_dev:
     build:
-      context: ../
+      context: ..
       dockerfile: .devcontainer/Dockerfile
       args:
-        BASE_IMAGE: "nvidia/cuda:12.8.0-runtime-ubuntu24.04"
+        # Pass the correct developer image for the build
+        BASE_IMAGE: "nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04"
     image: smart-dev:latest
     container_name: SmartDev
 
@@ -16,7 +17,8 @@ services:
     stdin_open: true
     tty: true
 
-    # ─── GPU support (all GPUs) ───
+    # --- GPU support (all GPUs) ---
+    # This is the modern way to request GPU access
     deploy:
       resources:
         reservations:
@@ -25,9 +27,9 @@ services:
               count: all
               capabilities: [gpu]
 
-    # ─── Mounts ───
+    # --- Mounts ---
     volumes:
-      # 1) Project root (one level up from .devcontainer) → /workspaces/smart_dev
+      # 1. Project root (one level up from .devcontainer)
       - ..:/workspaces/smart_dev:rw
 
       # 2) Your Windows user folder → /mnt/hostuser

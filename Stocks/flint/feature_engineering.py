@@ -14,7 +14,12 @@ class FeatureCalculator:
             if pd.api.types.is_numeric_dtype(self.df[col]):
                 self.df[col].values.flags.writeable = True
 
-    def add_all_features(self, market_df: pd.DataFrame | None = None):
+    def add_all_features(
+        self,
+        market_df: pd.DataFrame | None = None,
+        sector_df: pd.DataFrame | None = None,
+        macro_dfs: dict[str, pd.DataFrame] | None = None
+    ):
         """Orchestrator method to add all features."""
         self._add_rsi()
         self._add_macd()
@@ -30,12 +35,29 @@ class FeatureCalculator:
         self._add_returns()
         self._add_dominant_period()
         self._add_kalman_filter()
+        self._add_realized_vol()
+        self._add_hurst()
+        self._add_fractal_dimension()
+        # self._add_wavelet_ratio()
+        self._add_efficiency_ratio()
+        self._add_vwap_zscore()
         
-        # ADDED: Incorporate market context features if provided
+        # Incorporate market context features if provided
         if market_df is not None:
             self._add_spy_rsi(market_df)
             self._add_spy_return(market_df)
+
+        # ADDED: Incorporate sector context features if provided
+        if sector_df is not None:
+            self._add_sector_rsi(sector_df)
+            self._add_sector_return(sector_df)
         
+        # ADDED: Incorporate macroeconomic features if provided
+        if macro_dfs:
+            self._add_macro_features(macro_dfs)
+        
+        # Final dropna after all merges and calculations
+        # The ffill in macro_features handles daily gaps, this handles initial calculation NaNs
         self.df.dropna(inplace=True)
         return self.df
 
@@ -174,25 +196,10 @@ class FeatureCalculator:
 
         self.df['Dominant_Period'] = smooth
 
-    def _align_and_join(self, feature_series: pd.Series):
-        """Helper to safely join a feature series based on the 'Date' column."""
-        # Ensure both dataframes have a 'Date' index for joining
-        if 'Date' not in self.df.columns or 'Date' not in feature_series.index.names:
-             self.df.set_index('Date', inplace=True)
-             if 'Date' not in self.df.index.name: # Handle MultiIndex case
-                 self.df.index.names = ['Date' if name is None else name for name in self.df.index.names]
-
-        # Join and reset index to keep 'Date' as a column
-        self.df = self.df.join(feature_series, on='Date')
-
-
     def _add_spy_rsi(self, market_df: pd.DataFrame, period=14):
         """Calculates RSI for the market index and merges it."""
         market_df_c = market_df.copy()
-        # Ensure 'Date' is a datetime column for merging
         market_df_c['Date'] = pd.to_datetime(market_df_c['Date'])
-        
-        # Set index for calculation, but don't modify the original
         market_df_calc = market_df_c.set_index('Date')
 
         delta = market_df_calc['Close'].diff()
@@ -204,67 +211,76 @@ class FeatureCalculator:
         spy_rsi = 100 - (100 / (1 + rs))
         spy_rsi.name = 'SPY_RSI14'
         
-        # Align and merge using the 'Date' column
         self.df['Date'] = pd.to_datetime(self.df['Date'])
         self.df = self.df.merge(spy_rsi, on='Date', how='left')
 
-    # --- MODIFIED: _add_spy_return ---
     def _add_spy_return(self, market_df: pd.DataFrame):
         """Calculates daily return for the market index and merges it."""
         market_df_c = market_df.copy()
-        # Ensure 'Date' is a datetime column for merging
         market_df_c['Date'] = pd.to_datetime(market_df_c['Date'])
-        
-        # Set index for calculation, but don't modify the original
         market_df_calc = market_df_c.set_index('Date')
 
         spy_return = market_df_calc['Close'].pct_change().fillna(0) * 100
         spy_return.name = 'SPY_Return1'
         
-        # Align and merge using the 'Date' column
         self.df['Date'] = pd.to_datetime(self.df['Date'])
         self.df = self.df.merge(spy_return, on='Date', how='left')
 
-    # def _add_fractal_dimension(x, kmax=10):
-    #     """Compute Higuchi Fractal Dimension for 1D array x."""
-    #     N = len(x)
-    #     Lk = []
-    #     # Loop over k (segment length)
-    #     for k in range(1, kmax + 1):
-    #         Lm = []
-    #         for m in range(k):  # starting offset m = 0,...,k-1
-    #             length = 0.0
-    #             n_max = int(np.floor((N - m - 1) / k))
-    #             for i in range(1, n_max + 1):
-    #                 # Accumulate absolute increments |x[m + i*k] - x[m + (i-1)*k]|
-    #                 length += abs(x[m + i*k] - x[m + (i-1)*k])
-    #             if n_max > 0:
-    #                 # Scale length by factor (N-1)/(n_max * k) as per Higuchi’s formula
-    #                 length = length * (N - 1) / (n_max * k)
-    #                 Lm.append(length)
-    #         if Lm:
-    #             Lk.append(np.mean(Lm))
-    #     # If we have lengths for different k, perform linear fit in log-log to estimate dimension
-    #     Lk = np.array(Lk)
-    #     if Lk.size < 2:
-    #         return np.nan  # not enough points
-    #     logk = np.log(np.arange(1, len(Lk) + 1))
-    #     logLk = np.log(Lk)
-    #     # Slope of log(Lk) vs log(k). Fractal dimension D ≈ -slope
-    #     slope, _ = np.polyfit(logk, logLk, 1)
-    #     # return -slope
+    # --- ADDED: Sector Feature Methods ---
+    def _add_sector_rsi(self, sector_df: pd.DataFrame, period=14):
+        """Calculates RSI for the sector ETF and merges it."""
+        sector_df_c = sector_df.copy()
+        sector_df_c['Date'] = pd.to_datetime(sector_df_c['Date'])
+        sector_df_calc = sector_df_c.set_index('Date')
 
-    #     # Compute rolling Higuchi FD on Close price (e.g., 252-day window)
-    #     close_prices = self.df['Close'].values
-    #     window = 252
-    #     fractal_dim_vals = [np.nan] * (window - 1)  # no value for initial window-1 days
-    #     for t in range(window - 1, len(close_prices)):
-    #         segment = close_prices[t-window+1 : t+1]
-    #         fd = _add_fractal_dimension(segment, kmax=10)
-    #         fractal_dim_vals.append(fd)
+        delta = sector_df_calc['Close'].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+        rs = avg_gain / (avg_loss + 1e-9)
+        sector_rsi = 100 - (100 / (1 + rs))
+        sector_rsi.name = 'SECTOR_RSI14'
+        
+        self.df['Date'] = pd.to_datetime(self.df['Date'])
+        self.df = self.df.merge(sector_rsi, on='Date', how='left')
 
-    #     # Store as pandas Series in metrics
-    #     self.df['fractal_dim'] = pd.Series(fractal_dim_vals, index=self.df.index)
+    def _add_sector_return(self, sector_df: pd.DataFrame):
+        """Calculates daily return for the sector ETF and merges it."""
+        sector_df_c = sector_df.copy()
+        sector_df_c['Date'] = pd.to_datetime(sector_df_c['Date'])
+        sector_df_calc = sector_df_c.set_index('Date')
+
+        sector_return = sector_df_calc['Close'].pct_change().fillna(0) * 100
+        sector_return.name = 'SECTOR_Return1'
+        
+        self.df['Date'] = pd.to_datetime(self.df['Date'])
+        self.df = self.df.merge(sector_return, on='Date', how='left')
+
+    # --- ADDED: Macroeconomic Feature Method ---
+    def _add_macro_features(self, macro_dfs: dict[str, pd.DataFrame]):
+        """Merges multiple macroeconomic indicators into the main dataframe."""
+        self.df['Date'] = pd.to_datetime(self.df['Date'])
+
+        for name, df_macro in macro_dfs.items():
+            if df_macro is None or df_macro.empty:
+                print(f"Warning: Macro indicator '{name}' data is empty. Skipping.")
+                self.df[name] = np.nan # Add empty column to maintain schema
+                continue
+            
+            macro_series = df_macro.copy()
+            macro_series['Date'] = pd.to_datetime(macro_series['Date'])
+            
+            if 'Close' not in macro_series.columns:
+                 print(f"Warning: 'Close' column not found for macro indicator '{name}'. Skipping.")
+                 continue
+
+            macro_series = macro_series[['Date', 'Close']].rename(columns={'Close': name})
+            self.df = pd.merge(self.df, macro_series, on='Date', how='left')
+            
+        # Forward-fill the macro data to handle non-trading days (e.g., weekends, holidays for VIX)
+        macro_cols = [name for name in macro_dfs.keys() if name in self.df.columns]
+        self.df[macro_cols] = self.df[macro_cols].ffill()
 
     def _add_kalman_filter(self, Q=1e-5, R=1e-2):
         """
@@ -291,11 +307,87 @@ class FeatureCalculator:
                 P[t] = (1 - K) * P_pred
             return filtered
 
-        # Ensure we are working with a numpy array
         close_prices = self.df['Close'].values
-        
-        # Apply the filter
         filtered_close = _kalman_filter_internal(close_prices, Q, R)
-        
-        # Assign the result back to the DataFrame
         self.df['Kalman_Close'] = pd.Series(filtered_close, index=self.df.index)
+
+    def _add_realized_vol(self, window: int = 21):
+        lr = np.log(self.df['Close']/self.df['Close'].shift(1)).dropna()
+        vol = lr.rolling(window).std() * np.sqrt(252)
+        self.df['RealVol'] = vol.reindex(self.df.index)
+    
+    
+    def _add_hurst(self):
+        def hurst(ts):
+            lags = [2,4,8,16,32,64]
+            variances = [np.var(ts[lag:] - ts[:-lag]) for lag in lags]
+            slope, _ = np.polyfit(np.log(lags), np.log(variances), 1)
+            return slope/2
+        self.df['Hurst'] = hurst(self.df['Close'].values)
+    
+    def _add_fractal_dimension(self, window: int = 252, kmax: int = 10):
+        prices = self.df['Close'].values
+        fd_vals = [np.nan]*(window-1)
+        for t in range(window-1, len(prices)):
+            seg = prices[t-window+1:t+1]
+            # Higuchi FD
+            N = len(seg)
+            Lk = []
+            for k in range(1, kmax+1):
+                Lm = []
+                for m in range(k):
+                    length = 0
+                    nmax = (N-m-1)//k
+                    for i in range(1,nmax+1):
+                        length += abs(seg[m+i*k] - seg[m+(i-1)*k])
+                    if nmax>0:
+                        Lm.append(length*(N-1)/(nmax*k))
+                if Lm:
+                    Lk.append(np.mean(Lm))
+            if len(Lk)>1:
+                slope,_ = np.polyfit(np.log(np.arange(1,len(Lk)+1)), np.log(Lk),1)
+                fd_vals.append(-slope)
+            else:
+                fd_vals.append(np.nan)
+        self.df['Fractal_Dim'] = pd.Series(fd_vals, index=self.df.index)
+    
+    # def _add_wavelet_ratio(self, window: int = 30, wavelet: str = 'haar', level: int = 3):
+    #     prices = self.df['Close'].values
+    #     vals = [np.nan]*(window-1)
+    #     for t in range(window-1, len(prices)):
+    #         seg = prices[t-window+1:t+1]
+    #         coeffs = pywt.wavedec(seg, wavelet, level=level)
+    #         detail = np.sum([np.sum(c**2) for c in coeffs[1:]])
+    #         approx = np.sum(coeffs[0]**2)
+    #         vals.append(detail/(detail+approx+1e-9))
+    #     self.df['Wavelet_Ratio'] = pd.Series(vals, index=self.df.index)
+    
+    def _add_efficiency_ratio(self, period: int = 10):
+        p = self.df['Close']
+        vals = [np.nan]*period
+        for t in range(period, len(p)):
+            change = abs(p.iloc[t] - p.iloc[t-period])
+            volatility = p.iloc[t-period+1:t+1].diff().abs().sum()
+            vals.append(change/(volatility+1e-9))
+        self.df['Eff_Ratio'] = pd.Series(vals, index=self.df.index)
+    
+    def _add_vwap_zscore(self, window: int = 20):
+        p = self.df['Close'].values
+        v = self.df['Volume'].values
+        vals = [np.nan]*window
+        for t in range(window, len(p)):
+            ps = p[t-window:t]
+            vs = v[t-window:t]
+            vwap = np.sum(ps*vs)/np.sum(vs)
+            std = np.std(ps)
+            vals.append((p[t]-vwap)/(std+1e-9))
+        self.df['VWAP_Z'] = pd.Series(vals, index=self.df.index)
+    
+    # def _add_arima_resid_z(self, order=(5,0,0)):
+    #     rets = self.df['Close'].pct_change().dropna()
+    #     mod = sm.tsa.ARIMA(rets, order=order).fit()
+    #     resid = mod.resid; mu=resid.mean(); sd=resid.std(ddof=0)
+    #     z = (resid - mu)/ (sd+1e-9)
+    #     full = pd.Series(np.nan, index=self.df.index)
+    #     full.iloc[1:] = z.values
+    #     self.df['ARIMA_Resid_Z'] = full
