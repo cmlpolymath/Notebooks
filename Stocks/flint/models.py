@@ -154,7 +154,7 @@ def train_transformer(X_train, y_train, X_test, y_test):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg['lr'])
     
-    # --- THE FIX IS HERE ---
+    # ADDED: Use ReduceLROnPlateau scheduler for better learning rate management
     # The 'verbose' argument was removed in newer PyTorch versions.
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2, factor=0.5)
 

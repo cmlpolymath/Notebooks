@@ -6,7 +6,7 @@ START_DATE = (datetime.today() - timedelta(days=365*10)).strftime('%Y-%m-%d')
 END_DATE = datetime.today().strftime('%Y-%m-%d')
 MARKET_INDEX_TICKER = 'SPY' # Added for market context
 
-# ADDED: Mapping of yfinance sectors to representative ETFs
+# Mapping of yfinance sectors to representative ETFs
 SECTOR_ETF_MAP = {
     'Technology': 'XLK',
     'Communication Services': 'XLC',
@@ -14,6 +14,7 @@ SECTOR_ETF_MAP = {
     'Financials': 'XLF',
     'Industrials': 'XLI',
     'Consumer Discretionary': 'XLY',
+    'Consumer Cyclical': 'XLY',
     'Consumer Staples': 'XLP',
     'Energy': 'XLE',
     'Utilities': 'XLU',
@@ -21,13 +22,44 @@ SECTOR_ETF_MAP = {
     'Basic Materials': 'XLB'
 }
 
-# ADDED: Tickers for macroeconomic indicators from yfinance
+# Tickers for macroeconomic indicators from yfinance
 MACRO_TICKERS = {
     'VIX': '^VIX',             # Volatility Index
     '10Y_Treasury': '^TNX',    # 10-Year Treasury Yield
     'Crude_Oil': 'CL=F',       # Crude Oil Futures
     'Gold': 'GC=F'             # Gold Futures
 }
+
+FRED_INDICATORS = {
+    'CPI':             'CPIAUCSL',
+    'TreasurySpread':  'T10Y2Y',
+    'Unemployment':    'UNRATE',
+    'GDP':             'GDP',
+    'FedFunds':        'FEDFUNDS',
+    'Mortgage30Yr':    'MORTGAGE30US',
+    'IndustrialProd':  'INDPRO',
+    'RetailSales':     'RSXFS',
+    'HousingStarts':   'HOUST',
+    'NASDAQ':          'NASDAQCOM',
+    'ConsumerSenti':   'UMCSENT',
+    'ProdPriceIdx':    'PPIACO',
+}
+
+fred_engineered_features = []
+for name in FRED_INDICATORS.keys():
+    fred_engineered_features.extend([
+        f"{name}_DaysSinceUpdate",
+        f"{name}_InEventWindow"
+    ])
+
+relational_macro_features = [
+    'Corr_Stock_FedFunds_60D',
+    'Corr_Stock_CPI_60D',
+    'TreasurySpread_RealVol_21D',
+    'Real_FedFunds',
+    'Stock_vs_GDP_Ratio',
+    'CPI_ROC_3M'
+]
 
 # --- Feature Configuration ---
 # List of feature columns to be used by the models
@@ -43,7 +75,10 @@ FEATURE_COLS = [
     'VWAP_zscore',
     'SPY_RSI14', 'SPY_Return1', # Market context features
     'SECTOR_RSI14', 'SECTOR_Return1', # Sector features
-    'VIX', '10Y_Treasury', 'Crude_Oil', 'Gold' # Macro features
+    'VIX', '10Y_Treasury', 'Crude_Oil', 'Gold', # Macro features
+    *FRED_INDICATORS.keys(), # Unpack all the FRED indicator names here
+    *fred_engineered_features,
+    *relational_macro_features
 ]
 
 

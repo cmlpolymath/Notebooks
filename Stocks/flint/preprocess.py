@@ -24,6 +24,18 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
     3. Saves the processed data to a cache file for future runs.
     4. Returns a dictionary containing all processed data objects.
     """
+
+ # --- Fetch and cache macro data FIRST, independently of the stock. ---
+    print("\n--- Checking FRED Macroeconomic Data Cache ---")
+    df_macro_fred = data_handler.get_macro_data(force_redownload=force_reprocess)
+    
+    print("\n--- Checking yfinance Macroeconomic Data Cache ---")
+    macro_dfs_yf = {}
+    for name, macro_ticker in config.MACRO_TICKERS.items():
+        macro_dfs_yf[name] = data_handler.get_stock_data(
+            ticker=macro_ticker, start_date=start_date, end_date=end_date, force_redownload=force_reprocess
+        )
+
     processed_dir = Path('data/processed')
     processed_dir.mkdir(parents=True, exist_ok=True)
     
@@ -66,21 +78,25 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
     else:
         print("Crypto asset detected. Skipping sector-specific feature engineering.")
 
-    # Load Macro Data (applies to both stocks and crypto)
-    macro_dfs = {}
-    print("Fetching macroeconomic data...")
-    for name, macro_ticker in config.MACRO_TICKERS.items():
-        macro_dfs[name] = data_handler.get_stock_data(ticker=macro_ticker, start_date=start_date, end_date=end_date)
-
-    # Step 2: Calculate all features
+    # Step 2: Calculate all features, now including the new FRED data
     feature_calculator = FeatureCalculator(df_raw.copy())
     df_features = feature_calculator.add_all_features(
         market_df=market_df.copy() if market_df is not None else None,
         sector_df=sector_df.copy() if sector_df is not None else None,
-        macro_dfs=macro_dfs
+        macro_dfs_yf=macro_dfs_yf, # Pass yfinance macro data
+        df_macro_fred=df_macro_fred # Pass new FRED macro data
     )
     df_features.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_features.dropna(inplace=True)
+
+    # --- Check data length AFTER feature engineering and BEFORE splitting ---
+    min_required_rows = config.SEQUENCE_WINDOW_SIZE + 100 # e.g., 60 + 100 = 160
+    if len(df_features) < min_required_rows:
+        raise ValueError(
+            f"Insufficient data for {ticker} after feature engineering. "
+            f"Need at least {min_required_rows} rows, but only {len(df_features)} remain. "
+            "This is often due to long lookback periods in features (e.g., 252 days for YoY inflation)."
+        )
     
     # Step 3: Define target and finalize DataFrame
     df_model = df_features.copy()

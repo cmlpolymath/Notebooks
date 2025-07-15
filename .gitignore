@@ -4,6 +4,8 @@ __pycache__
 results/*
 **/*.csv
 **/*.txt
+**/*.env
 **/data/
 **/text_output/
 **/*.duckdb
+**/*.log

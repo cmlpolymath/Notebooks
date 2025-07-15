@@ -1,9 +1,12 @@
 # data_handler.py
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import pandas as pd
 import yfinance as yf
 import re
+import asyncio
+from economics import fetch_macro_indicators
+from config import FRED_INDICATORS
 
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -102,3 +105,40 @@ def get_stock_data(ticker: str, start_date: str, end_date: str, force_redownload
     df_combined.to_parquet(parquet_path, index=False)
     
     return df_combined
+
+def get_macro_data(force_redownload: bool = False) -> pd.DataFrame | None:
+    """
+    Fetch macroeconomic data from FRED, with intelligent caching.
+    1. Checks for a cached Parquet file.
+    2. If the cache is recent (from today), it's used.
+    3. Otherwise, it fetches fresh data from the FRED API and updates the cache.
+    """
+    Path('data').mkdir(exist_ok=True)
+    parquet_path = Path('data/macro_indicators_daily.parquet')
+
+    if not force_redownload and parquet_path.exists():
+        last_mod_time = date.fromtimestamp(parquet_path.stat().st_mtime)
+        if last_mod_time >= date.today():
+            print(f"Found recent macro data cache. Loading from '{parquet_path}'.")
+            return pd.read_parquet(parquet_path)
+        else:
+            print("Macro data cache is outdated. Fetching fresh data...")
+    else:
+        print("No macro data cache found. Fetching from FRED API...")
+
+    try:
+        # Pass the dictionary to the function
+        print("Running async FRED fetcher...")
+        df_macro = asyncio.run(fetch_macro_indicators(FRED_INDICATORS))
+        
+        # Save to cache for future runs
+        df_macro.to_parquet(parquet_path)
+        print(f"Successfully fetched and cached macro data to '{parquet_path}'.")
+        return df_macro
+    except Exception as e:
+        print(f"!!! FAILED to fetch macroeconomic data: {e}")
+        # If fetching fails but an old cache exists, use it as a fallback
+        if parquet_path.exists():
+            print(f"Using stale cache from '{parquet_path}' as a fallback.")
+            return pd.read_parquet(parquet_path)
+        return None

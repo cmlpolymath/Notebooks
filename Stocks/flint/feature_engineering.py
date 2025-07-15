@@ -18,7 +18,8 @@ class FeatureCalculator:
         self,
         market_df: pd.DataFrame | None = None,
         sector_df: pd.DataFrame | None = None,
-        macro_dfs: dict[str, pd.DataFrame] | None = None
+        macro_dfs_yf: dict[str, pd.DataFrame] | None = None,
+        df_macro_fred: pd.DataFrame | None = None
     ):
         """Orchestrator method to add all features."""
         self._add_rsi()
@@ -52,12 +53,17 @@ class FeatureCalculator:
             self._add_sector_rsi(sector_df)
             self._add_sector_return(sector_df)
         
-        # ADDED: Incorporate macroeconomic features if provided
-        if macro_dfs:
-            self._add_macro_features(macro_dfs)
+        # Incorporate yfinance macroeconomic features if provided
+        if macro_dfs_yf:
+            self._add_yf_macro_features(macro_dfs_yf)
         
-        # Final dropna after all merges and calculations
-        # The ffill in macro_features handles daily gaps, this handles initial calculation NaNs
+        if df_macro_fred is not None:
+            self._add_fred_macro_features(df_macro_fred)
+
+        # This is called AFTER the merge, so we can create interaction features.
+        self._add_relational_macro_features()
+
+        # --- Final Cleanup ---
         self.df.dropna(inplace=True)
         return self.df
 
@@ -258,11 +264,11 @@ class FeatureCalculator:
         self.df = self.df.merge(sector_return, on='Date', how='left')
 
     # --- ADDED: Macroeconomic Feature Method ---
-    def _add_macro_features(self, macro_dfs: dict[str, pd.DataFrame]):
-        """Merges multiple macroeconomic indicators into the main dataframe."""
+    def _add_yf_macro_features(self, macro_dfs_yf: dict[str, pd.DataFrame]):
+        """Merges multiple yfinance indicators into the main dataframe."""
         self.df['Date'] = pd.to_datetime(self.df['Date'])
 
-        for name, df_macro in macro_dfs.items():
+        for name, df_macro in macro_dfs_yf.items():
             if df_macro is None or df_macro.empty:
                 print(f"Warning: Macro indicator '{name}' data is empty. Skipping.")
                 self.df[name] = np.nan # Add empty column to maintain schema
@@ -279,8 +285,73 @@ class FeatureCalculator:
             self.df = pd.merge(self.df, macro_series, on='Date', how='left')
             
         # Forward-fill the macro data to handle non-trading days (e.g., weekends, holidays for VIX)
-        macro_cols = [name for name in macro_dfs.keys() if name in self.df.columns]
+        macro_cols = [name for name in macro_dfs_yf.keys() if name in self.df.columns]
         self.df[macro_cols] = self.df[macro_cols].ffill()
+
+    def _add_fred_macro_features(self, df_macro_fred: pd.DataFrame):
+        """
+        Merges the pre-processed, daily-indexed FRED data into the main dataframe.
+        """
+        if 'Date' not in self.df.columns:
+             self.df.reset_index(inplace=True)
+
+        self.df['Date'] = pd.to_datetime(self.df['Date'])
+        df_macro_fred = df_macro_fred.set_index(pd.to_datetime(df_macro_fred.index))
+        
+        # Merge the entire pre-engineered DataFrame.
+        # All columns from df_macro_fred will be added.
+        self.df = pd.merge(self.df, df_macro_fred, left_on='Date', right_index=True, how='left')
+        
+        # Forward-fill to handle any weekend/holiday misalignments from the merge.
+        # The original ffill in economics.py handles the monthly/quarterly gaps.
+        self.df[df_macro_fred.columns] = self.df[df_macro_fred.columns].ffill()
+
+    def _add_relational_macro_features(self):
+        """
+        Creates features based on the interaction between the stock's data
+        and the already-merged macroeconomic data.
+        """
+        print("Engineering relational macroeconomic features...")
+        
+        # Helper to check if required columns exist before creating a feature
+        def check_cols(*args):
+            return all(col in self.df.columns for col in args)
+
+        # 1. Rolling Correlation: Stock Returns vs. Fed Funds Rate Changes
+        if check_cols('Return1', 'FedFunds'):
+            # First, calculate the daily % change of the FedFunds rate
+            fedfunds_change = self.df['FedFunds'].pct_change().fillna(0)
+            self.df['Corr_Stock_FedFunds_60D'] = self.df['Return1'].rolling(60).corr(fedfunds_change)
+
+        # 2. Rolling Correlation: Stock Returns vs. CPI Changes
+        if check_cols('Return1', 'CPI'):
+            cpi_change = self.df['CPI'].pct_change().fillna(0)
+            self.df['Corr_Stock_CPI_60D'] = self.df['Return1'].rolling(60).corr(cpi_change)
+
+        # 3. Realized Volatility of the Treasury Spread
+        if check_cols('TreasurySpread'):
+            spread_change = self.df['TreasurySpread'].pct_change().fillna(0)
+            # Calculate rolling std dev and annualize it
+            self.df['TreasurySpread_RealVol_21D'] = spread_change.rolling(21).std() * np.sqrt(252)
+
+        # 4. Real Fed Funds Rate (Nominal Rate - Inflation)
+        if check_cols('FedFunds', 'CPI'):
+            # Calculate Year-over-Year CPI inflation rate
+            yoy_inflation = self.df['CPI'].pct_change(252) * 100
+            self.df['Real_FedFunds'] = self.df['FedFunds'] - yoy_inflation
+
+        # 5. Stock Price vs. GDP Ratio (Valuation)
+        if check_cols('Close', 'GDP'):
+            # GDP is in Billions of USD. To make the ratio sensible, we don't need to scale it,
+            # but the model will learn the magnitude.
+            self.df['Stock_vs_GDP_Ratio'] = self.df['Close'] / self.df['GDP']
+
+        # 6. 3-Month Rate of Change for CPI
+        if check_cols('CPI'):
+            # 63 trading days is approximately 3 months
+            self.df['CPI_ROC_3M'] = self.df['CPI'].pct_change(63) * 100
+            
+        print("Relational features engineered.")
 
     def _add_kalman_filter(self, Q=1e-5, R=1e-2):
         """
