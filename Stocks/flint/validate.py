@@ -53,16 +53,23 @@ def run_walk_forward_validation(ticker: str, years: int, model_type: str):
         except Exception as e:
             print(f"Warning: Failed to load sector data during validation. Error: {e}")
 
-        macro_dfs = {}
+        macro_dfs_yf = {}
         for name, macro_ticker in config.MACRO_TICKERS.items():
-            macro_dfs[name] = data_handler.get_stock_data(macro_ticker, start_str, end_str)
+            macro_dfs_yf[name] = data_handler.get_stock_data(macro_ticker, start_str, end_str)
+
+        df_macro_fred = None
+        try:
+            df_macro_fred = data_handler.get_macro_data(force_redownload=False)
+        except Exception as e:
+            print(f"Warning: Failed to load FRED macro data during validation. Error: {e}")
 
         # Re-run feature engineering on the filtered data
         feature_calculator = FeatureCalculator(df_raw.copy())
         df_features = feature_calculator.add_all_features(
             market_df=market_df.copy() if market_df is not None else None,
             sector_df=sector_df.copy() if sector_df is not None else None,
-            macro_dfs=macro_dfs
+            macro_dfs_yf=macro_dfs_yf.copy() if macro_dfs_yf is not None else None,
+            df_macro_fred=df_macro_fred.copy() if df_macro_fred is not None else None
         )
         
         # Define the target variable

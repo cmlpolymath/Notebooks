@@ -1,11 +1,12 @@
 __pycache__
 .ruff_cache
 **/*.venv/
-results/*
+**/*results/*
 **/*.csv
 **/*.txt
 **/*.env
-**/data/
+**/*data/*
 **/text_output/
 **/*.duckdb
 **/*.log
+**/*__duckdb_optuna__code.md

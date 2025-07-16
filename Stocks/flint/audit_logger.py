@@ -5,6 +5,7 @@ from datetime import datetime
 import git
 from pathlib import Path
 import numpy as np
+import optuna
 
 DB_PATH = Path('results/audit_log.duckdb')
 
@@ -84,6 +85,68 @@ def log_analysis_result(ticker: str, model_name: str, run_config: dict, predicti
             [run_id, ticker, execution_timestamp, model_name, git_hash, config_json, predictions_json, metrics_json, shap_json]
         )
         
-        # Explicitly force the transaction to be written to the database file.
         con.commit()
-        # The 'with' statement will handle closing the connection after the commit.
+
+def setup_tuning_table():
+    """Creates Optuna tuning table in DuckDB if not exists"""
+    with duckdb.connect(str(DB_PATH)) as con:
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS tuning (
+            study_id VARCHAR PRIMARY KEY,
+            study_name VARCHAR,
+            ticker VARCHAR,
+            git_hash VARCHAR,
+            start_time TIMESTAMP,
+            end_time TIMESTAMP,
+            best_params JSON,
+            best_value DOUBLE,
+            trials JSON,
+            pareto_front JSON
+        );
+        """)
+        con.commit()
+
+def log_tuning_study(study: optuna.Study, study_name: str, ticker: str):
+    """Logs Optuna study to DuckDB tuning table"""
+    git_hash = get_git_hash()
+    start_time = study.trials[0].datetime_start
+    end_time = study.trials[-1].datetime_complete
+    
+    # Serialize trials data
+    trials_data = []
+    for trial in study.trials:
+        trials_data.append({
+            "number": trial.number,
+            "params": trial.params,
+            "value": trial.value,
+            "duration": (trial.datetime_complete - trial.datetime_start).total_seconds(),
+            "state": trial.state.name
+        })
+    
+    # For multi-objective studies
+    pareto_front = []
+    if study._is_multi_objective():
+        pareto_front = [{"values": t.values, "params": t.params} for t in study.best_trials]
+    
+    # Prepare data
+    data = {
+        "study_id": str(study._study_id),
+        "study_name": study_name,
+        "ticker": ticker,
+        "git_hash": git_hash,
+        "start_time": start_time,
+        "end_time": end_time,
+        "best_params": json.dumps(study.best_params),
+        "best_value": study.best_value,
+        "trials": json.dumps(trials_data),
+        "pareto_front": json.dumps(pareto_front)
+    }
+    
+    # Insert into DuckDB
+    with duckdb.connect(str(DB_PATH)) as con:
+        con.execute("""
+        INSERT OR REPLACE INTO tuning 
+        (study_id, study_name, ticker, git_hash, start_time, end_time, best_params, best_value, trials, pareto_front)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, list(data.values()))
+        con.commit()

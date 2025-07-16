@@ -1,6 +1,7 @@
 # preprocess.py
 import os
 from pathlib import Path
+from datetime import date
 import torch
 import numpy as np
 import pandas as pd
@@ -38,14 +39,17 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
 
     processed_dir = Path('data/processed')
     processed_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Use the same sanitized filename as in data_handler
     safe_ticker = data_handler.sanitize_ticker_for_filename(ticker)
     cache_file = processed_dir / f"{safe_ticker}_data.pt"
 
+    # Check if the processed cache file exists AND is from today.
     if not force_reprocess and cache_file.exists():
-        print(f"Loading cached processed data for {ticker} from '{cache_file}'")
-        return torch.load(cache_file, weights_only=False)
+        last_mod_time = date.fromtimestamp(cache_file.stat().st_mtime)
+        if last_mod_time >= date.today():
+            print(f"Found recent processed data cache for {ticker}. Loading from '{cache_file}'.")
+            return torch.load(cache_file, weights_only=False)
+        else:
+            print(f"Processed data cache for {ticker} is outdated. Reprocessing...")
 
     print(f"Processing and caching data for {ticker}...")
 

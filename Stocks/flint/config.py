@@ -115,7 +115,7 @@ TRANSFORMER_TRAINING = {
 ADVANCED_MC_PARAMS = {
     'gbm_lookback': 63,
     'jump_window': 21,
-    'n_optimize': 50,
-    'base_n_sims': 1000,
-    'n_jobs': -1
+    'base_n_sims': 1000
+    # 'n_optimize': 50,
+    # 'n_jobs': -1
 }

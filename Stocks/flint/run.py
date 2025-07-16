@@ -1,4 +1,6 @@
 # run.py
+import os
+import json
 import initialize
 import time
 import argparse
@@ -39,6 +41,12 @@ def main():
     
     audit_logger.setup_audit_db()
 
+    tuned_xgb_params = None
+    if os.path.exists('best_xgb_params.json'):
+        print("\n--- Found tuned XGBoost parameters. They will be used for this run. ---")
+        with open('best_xgb_params.json', 'r') as f:
+            tuned_xgb_params = json.load(f)
+
     for ticker in args.tickers:
         print(f"\n{'='*25} Processing Ticker: {ticker} | Model: {args.model.upper()} {'='*25}")
         try:
@@ -76,7 +84,10 @@ def main():
 
             elif args.model == 'xgb':
                 print("\n--- Training XGBoost model ---")
-                xgb_model = models.train_xgboost(X_train, y_train)
+                # Use tuned params if available, otherwise use defaults from config
+                xgb_params_to_use = tuned_xgb_params or config.XGB_PARAMS
+                
+                xgb_model = models.train_xgboost(X_train, y_train, params=xgb_params_to_use)
                 final_proba = xgb_model.predict_proba(X_test)[:, 1]
                 y_test_final = y_test_orig.values
                 shap_values = models.get_shap_importance(xgb_model, X_test)
@@ -84,7 +95,10 @@ def main():
 
             elif args.model == 'ensemble':
                 print("\n--- Training XGBoost component ---")
-                xgb_model = models.train_xgboost(X_train, y_train)
+                # Use tuned params if available, otherwise use defaults from config
+                xgb_params_to_use = tuned_xgb_params or config.XGB_PARAMS
+
+                xgb_model = models.train_xgboost(X_train, y_train, params=xgb_params_to_use)
                 xgb_proba = xgb_model.predict_proba(X_test)[:, 1]
                 shap_values = models.get_shap_importance(xgb_model, X_test)
 

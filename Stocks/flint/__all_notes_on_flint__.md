@@ -236,4 +236,148 @@ You can now easily add more features by following this simple, repeatable patter
     ]
     ```
 
-That's it. By following these four steps, you can systematically add any number of new, complex, relational features to your model. This pattern keeps your code organized, robust, and easy to extend.
+Of course. Here is a comprehensive summary of the project in Markdown format, detailing its evolution, features, architecture, and future steps.
+
+---
+
+# Algorithmic Trading & Forecasting Engine: Project Overview
+
+## 1. Project Evolution: From V1 to V2
+
+### Summary
+
+This project has evolved from a foundational machine learning pipeline (V1) into a sophisticated, multi-faceted forecasting engine (V2). The initial version focused on using standard technical indicators to train multiple models. The current version has expanded dramatically to incorporate a rich set of macroeconomic data, sector analysis, and advanced simulation techniques. It now features a modular architecture with multiple, selectable predictive models, robust data caching, and a stable, reproducible forecasting process suitable for rigorous backtesting and analysis.
+
+Of course. My apologies for the mischaracterizations. You are absolutely right to correct the record—the initial version was far more sophisticated than my summary portrayed. The goal is to accurately capture the *evolution* of the features, not to downplay the starting point.
+
+Here is the revised and more accurate V1 vs. V2 Feature Comparison table, reflecting the facts you've provided.
+
+---
+
+### V1 vs. V2 Feature Comparison
+
+| Feature | V1 (Advanced Start)| V2 (Current State) |
+| :--- | :--- | :--- |
+| **Data Sources** | Stock, Market (SPY), Sector ETFs, and yfinance Macro (VIX, Oil, etc.). | **Expanded with FRED Macroeconomics:** Adds a new, robust data layer for CPI, GDP, Fed Funds Rate, etc., fetched via an asynchronous `economics.py` module. |
+| **Feature Set** | A strong set of technical indicators and basic macro features. | **Significantly Enhanced with Relational & Event-Based Features:** Now includes over 60 features, creating powerful interactions like *Real Fed Funds Rate*, *rolling correlations* between stock returns and macro data, and event-based indicators like *Days Since CPI Update*. |
+| **Predictive Models** | A single model at runtime (e.g., `XGBoost` + `Transformer`). | **Multiple selectable models:** `rf` (Random Forest), `xgb` (XGBoost), and a complex `ensemble` (XGBoost + Transformer), selectable via a command-line argument. |
+| **Forecasting** | A dual-component forecast with an ML prediction and a Monte Carlo simulation. | **Refined Dual-Component Forecasting:** The ML component is now selectable and can be weighted. The Monte Carlo component is now a stable, independent pillar of the forecast. |
+| **Monte Carlo** | An advanced Jump-Diffusion model, but prone to instability between runs. | **Stabilized & Hardened Monte Carlo:** Now fully reproducible using comprehensive **seeding**, quasi-random **Sobol sequences**, and **antithetic variates**. The drift calculation is simplified to a more robust `linregress` model. |
+| **Data Pipeline** | An intelligent caching system for stock and yfinance data. | **More Robust & Granular Caching:** The caching system is now more resilient and handles the new, independent FRED macro data cache, ensuring all data sources are checked for freshness on every run. |
+| **Validation** | A robust Walk-Forward Validation script was already in place. | **Validation Integrated with All Data Sources:** The `validate.py` script has been updated to correctly pull and process the new FRED macro data, ensuring rigorous testing of the full feature set. |
+| **User Interface** | An interactive dashboard (`visualization.py`) displayed results. | **Enhanced Dashboard with Deeper Insights:** The dashboard now adapts to the asset type (stocks vs. crypto) and presents a more actionable forecast with clear entry, stop-loss, and take-profit levels derived from the model's output. |
+| **Code Architecture** | A modular and extensible architecture. | **Refined Modular Architecture:** The architecture has been further improved by encapsulating all FRED data fetching and initial feature creation within the dedicated `economics.py` module, making the system even cleaner and easier to maintain. |
+
+## 2. Key Project Features
+
+This algorithmic analysis engine represents a state-of-the-art framework for generating quantitative financial forecasts. It leverages a powerful synthesis of machine learning, stochastic modeling, and comprehensive data integration to produce actionable, multi-horizon insights.
+
+-   **Hybrid Forecasting Model:** The system's core strength lies in its dual-component approach. It combines the pattern-recognition power of **gradient-boosted trees (XGBoost) and Transformers** for short-term predictions with a sophisticated **Jump-Diffusion Monte Carlo simulation** that models long-term trend dynamics, providing a complete picture of an asset's potential trajectory.
+
+-   **Rich, Multi-Source Feature Engineering:** The engine moves beyond simple price data by integrating a vast array of predictive features:
+    -   **Technical Indicators:** A full suite of classic and advanced indicators, from RSI and MACD to GARCH Volatility and Dominant Cycle Periods.
+    -   **Macroeconomic Intelligence:** Seamlessly pulls and processes data from both `yfinance` (VIX, Oil) and the **FRED database** (CPI, GDP, Fed Funds Rate), creating powerful relational features like the *Real Fed Funds Rate* and *rolling correlations* between stock returns and inflation.
+    -   **Sector & Market Context:** Automatically identifies an asset's sector, incorporating the performance of benchmark ETFs (e.g., SPY, XLK) to gauge relative strength and market sentiment.
+
+-   **Advanced Monte Carlo Simulation:** The `predictors.py` module is a professional-grade simulation engine. It is stabilized for **full reproducibility** using quasi-random **Sobol sequences** and **antithetic variates** for variance reduction. It dynamically models **volatility regime-switching** and incorporates a neural network (LSTM) to predict market jumps, capturing the "fat-tailed" nature of real-world financial returns.
+
+-   **Robust Validation & Auditing:** The project is built for rigor and transparency.
+    -   A dedicated **Walk-Forward Validation** script (`validate.py`) provides an honest measure of out-of-sample performance, simulating real-world trading conditions.
+    -   Every analysis run is meticulously logged in a **DuckDB audit database**, capturing the model used, its configuration, feature importance, and the final prediction for complete traceability.
+
+-   **Flexible & User-Friendly Interface:**
+    -   The command-line interface allows users to analyze any stock or cryptocurrency ticker and **select the desired predictive model (`rf`, `xgb`, `ensemble`)** for the run.
+    -   The interactive **Dash-based dashboard** provides a comprehensive visual audit of any run, displaying price charts with signals, SHAP feature importances, Monte Carlo distributions, and key fundamental data.
+
+## 3. Architecture and Module Interaction
+
+### Module Summaries
+
+This project is composed of several specialized modules that work together in a sequential pipeline.
+
+-   **`config.py` (The Brain):** This is the central configuration file. It defines all key parameters, including date ranges, feature lists, model hyperparameters, and macroeconomic indicator codes. It governs the behavior of the entire application.
+
+-   **`run.py` (The Conductor):** This is the main entry point of the application. It parses user commands (ticker, model choice), orchestrates the pipeline by calling other modules in the correct order, and prints the final actionable forecast.
+
+-   **`economics.py` (The Economist):** A specialized, asynchronous data-fetching module. Its sole purpose is to connect to the FRED API, download a pre-defined list of economic indicators, and perform initial processing and feature engineering (e.g., `DaysSinceUpdate`) before saving the data.
+
+-   **`data_handler.py` (The Librarian):** This module manages all data persistence. It contains functions to intelligently fetch and cache data for stocks, ETFs, and the macroeconomic data from `economics.py`. It ensures that data is fresh and avoids redundant API calls.
+
+-   **`preprocess.py` (The Assembler):** This module acts as the primary data orchestrator. It calls `data_handler` to gather all the necessary raw data (stock, market, sector, macro). It then passes this collection of data to the `FeatureCalculator`.
+
+-   **`feature_engineering.py` (The Scientist):** This module receives the raw data and transforms it into a feature-rich dataset for the models. It calculates all technical indicators and creates powerful relational features by combining the stock data with the macroeconomic data.
+
+-   **`models.py` (The Learners):** This module defines the machine learning models (XGBoost, Transformer) and contains the logic for training them, preparing data sequences, and generating predictions.
+
+-   **`predictors.py` (The Physicist):** This module contains the advanced Monte Carlo simulation. It uses principles of stochastic calculus (Geometric Brownian Motion, Jump-Diffusion) to generate thousands of possible future price paths and forecast the underlying trend.
+
+-   **`validate.py` (The Skeptic):** A standalone script for rigorously testing model performance. It uses a walk-forward methodology to provide an honest assessment of a model's predictive accuracy over time.
+
+-   **`visualization.py` (The Artist):** The front-end of the project. It queries the audit database to fetch the results of a completed run and presents them in an interactive web-based dashboard.
+
+-   **`audit_logger.py` (The Scribe):** A simple utility that handles writing all results from a run into the `audit_log.duckdb` database, ensuring every prediction is recorded.
+
+### `predictors.py` Version Comparison
+
+The `predictors.py` module underwent the most significant evolution to improve its stability and realism.
+
+| Feature | Previous Version | Latest Version | Gain / Loss |
+| :--- | :--- | :--- | :--- |
+| **Randomness** | Standard `torch.randn`, results varied between runs. | **Sobol sequences** and **antithetic variates**. | **Gain:** Massive improvement in stability and faster convergence. |
+| **Reproducibility** | Not guaranteed. `Trend Strength` could flip signs. | **Fully seeded** with deterministic settings. | **Gain:** Guaranteed reproducibility. The same input will always produce the same output. |
+| **Jump Detection** | Present, using a Multi-Head Attention network. | Present, using a more suitable **LSTM network**. | **Gain:** LSTM is better suited for capturing temporal patterns in time series. |
+| **Jump Simulation** | Present in the simulation loop. | **Fully restored** and integrated with the new random sampling. | **Feature Preserved.** |
+| **Drift Calculation** | `GaussianProcessRegressor` (slow, prone to warnings). | Simple and fast `scipy.stats.linregress`. | **Gain:** Faster, more robust, and directly implements the solution the GPR was pointing to. |
+| **Volatility Model** | `GaussianMixture` for regime-switching. | `GaussianMixture` for regime-switching. | **Feature Preserved.** |
+
+## 4. Outstanding Needs & Future Work
+
+The project has a strong foundation, but several high-impact improvements are ready to be implemented to further enhance its performance and capabilities.
+
+-   **Hyperparameter Tuning:** The XGBoost model is the current top performer but uses default parameters. Implementing a systematic tuning process using a library like **`Optuna`** is the highest-priority next step to maximize its accuracy.
+
+-   **Advanced Ensemble Construction (Meta-Modeling):** The current weighted-average ensemble is an improvement but is still static. The next evolution is to build a **stacked ensemble**, where a simple meta-model (e.g., `LogisticRegression`) is trained to learn the optimal way to combine the outputs of the XGBoost and Transformer models, likely yielding higher accuracy and robustness.
+
+-   **Dynamic Feature Selection:** The Transformer model is currently underperforming, likely due to being overwhelmed by the large feature set. While we manually select the top 12 features from SHAP, a more dynamic approach could be implemented where a feature selection process (e.g., Recursive Feature Elimination) is run inside the pipeline to choose the optimal feature subset for each model independently.
+
+-   **Refined Target Variable:** Experiment with alternative definitions for the `UpNext` target variable. Instead of a simple price-over-moving-average, one could test:
+    -   **Volatility-Adjusted Target:** e.g., `future_price > current_price + 0.5 * ATR`.
+    -   **Market Outperformance Target:** e.g., `stock_return > spy_return`.
+
+-   **Time-Weighted SHAP Importance:** Currently, SHAP values are averaged over the entire test set. A more advanced analysis would be to weigh recent SHAP values more heavily to understand how feature importances are changing over time.
+
+---
+
+### Implementation Plan: "Lite" Model for New Assets
+
+*   **Objective:** Create a "Lite" mode that can run analysis on assets with limited historical data (e.g., less than 1.5 years), which currently fail due to long lookback periods in feature engineering.
+
+*   **Trigger Condition:**
+    *   In `preprocess.py`, after loading the raw stock data (`df_raw`), check its length: `if len(df_raw) < 350:`.
+    *   If the condition is met, set a boolean flag, `is_lite_mode = True`. This flag will control subsequent logic.
+
+*   **Dynamic Feature Set:**
+    *   In `config.py`, create a new list named `FEATURE_COLS_LITE`.
+    *   This list should contain only features with short lookback windows (e.g., 30 days or less).
+    *   **Include:** `RSI14`, `MACD_line`, `MACD_signal`, `MACD_hist`, `ATR14`, `Return1`, `Close`, `Volume`.
+    *   **Exclude:** All features with long lookbacks, especially those requiring 60, 126, or 252 days (e.g., `Real_FedFunds`, `CPI_ROC_3M`, `Corr_Stock_CPI_60D`, `Dominant_Period`).
+
+*   **Conditional Logic in `preprocess.py`:**
+    *   When calling `feature_calculator.add_all_features`, the features will still be calculated as before.
+    *   However, after the feature-rich DataFrame is created, use the `is_lite_mode` flag to select the final columns for the model.
+    *   If `is_lite_mode` is `True`, redefine the `feature_cols` variable: `feature_cols = [col for col in config.FEATURE_COLS_LITE if col in df_model.columns]`.
+    *   If `is_lite_mode` is `False`, use the standard `FEATURE_COLS` as is currently done.
+
+*   **Model Selection Override:**
+    *   In `run.py`, if `is_lite_mode` is detected (it can be passed back from `prepare_and_cache_data` in the `data_package`), the model selection should be overridden.
+    *   The Transformer model should be disabled in "Lite" mode because its `SEQUENCE_WINDOW_SIZE` of 60 is too large for the limited data.
+    *   Force the model to be `xgb` or `rf`, as they can operate on smaller datasets without a sequence requirement.
+    *   Log the model name clearly, for example: `model_name_log = "XGBoost_Lite_v1"`.
+
+*   **Final Output:**
+    *   The final actionable forecast should include a clear warning message indicating that the prediction was generated using "Lite" mode with a limited feature set and should be interpreted with extra caution.
+    *   Example: `print("WARNING: Running in Lite Mode due to limited data history. Forecast is less reliable.")`
+
+---
+* Our machine learning models require a complete, uninterrupted dataset for every single day to function, but NaN (missing) values are inevitably introduced from two sources. First, when we merge external data that updates at different frequencies (like daily stock prices with monthly CPI) or when a data source's cache is stale, gaps appear at the end of our timeline; a forward-fill (ffill) is essential to carry the last known valid observation forward to fill these recent gaps. Second, many of our most powerful features have a "long-lookback," meaning they require a long window of historical data to be calculated, such as a 252-day Year-over-Year inflation rate. This process creates NaNs at the beginning of our dataset where no prior history exists to look back on. To solve this, we use a back-fill (bfill) to propagate the first validly calculated value backward into these initial gaps. Therefore, we use both ffill and bfill as a robust, two-pronged strategy to fill all NaNs, which is critical to prevent the final dropna() command from incorrectly deleting valuable recent data and ensuring the model receives a complete data matrix for its analysis.
+---

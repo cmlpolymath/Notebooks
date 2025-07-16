@@ -68,9 +68,16 @@ class StockTransformer(nn.Module):
         return out
 
 # 2. Model Training and Prediction Functions
-def train_xgboost(X_train, y_train):
+def train_xgboost(X_train, y_train, params: dict | None = None):
+    """
+    Trains an XGBoost model using either provided parameters or defaults from config.
+    """
     print("Training XGBoost model...")
-    xgb_model = XGBClassifier(**config.XGB_PARAMS)
+    # If no specific params are passed, use the defaults from the config file
+    if params is None:
+        params = config.XGB_PARAMS
+        
+    xgb_model = XGBClassifier(**params)
     xgb_model.fit(X_train, y_train)
     return xgb_model
 
