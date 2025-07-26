@@ -7,7 +7,7 @@ import aiohttp
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
-from config import FRED_INDICATORS
+from config import settings
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -108,7 +108,7 @@ async def fetch_macro_indicators(indicators: dict) -> pd.DataFrame:
 # ─── Convenience entrypoint ─────────────────────────────────────────────────
 def main():
     """Standalone CLI: fetch and save parquet to disk."""
-    df = asyncio.run(fetch_macro_indicators(FRED_INDICATORS))
+    df = asyncio.run(fetch_macro_indicators(settings.features.fred_indicators))
     print("Generated DataFrame Head:")
     print(df.head())
     print("\nColumns:")

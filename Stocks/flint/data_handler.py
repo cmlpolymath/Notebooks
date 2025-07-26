@@ -6,7 +6,7 @@ import yfinance as yf
 import re
 import asyncio
 from economics import fetch_macro_indicators
-from config import FRED_INDICATORS
+from config import settings
 
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -129,7 +129,7 @@ def get_macro_data(force_redownload: bool = False) -> pd.DataFrame | None:
     try:
         # Pass the dictionary to the function
         print("Running async FRED fetcher...")
-        df_macro = asyncio.run(fetch_macro_indicators(FRED_INDICATORS))
+        df_macro = asyncio.run(fetch_macro_indicators(settings.features.fred_indicators))
         
         # Save to cache for future runs
         df_macro.to_parquet(parquet_path)

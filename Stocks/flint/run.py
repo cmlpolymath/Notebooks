@@ -1,5 +1,7 @@
 # run.py
 import os
+from rich import print
+from pathlib import Path
 import json
 import initialize
 import time
@@ -10,11 +12,13 @@ import pandas as pd
 import torch
 
 # Import project modules
-import config
+from config import settings
 import audit_logger
 import models
 import predictors
 from preprocess import prepare_and_cache_data
+
+settings.environment = 'production'  # Set the environment to production
 
 def validate_ticker(ticker):
     """Sanitize and validate a stock or crypto ticker format."""
@@ -24,53 +28,61 @@ def validate_ticker(ticker):
         return ticker
     raise argparse.ArgumentTypeError(f"'{ticker}' is not a valid ticker format.")
 
-# In run.py
-
 def main():
     parser = argparse.ArgumentParser(description="Run the stock/crypto analysis pipeline.")
     parser.add_argument('tickers', metavar='TICKER', type=validate_ticker, nargs='+',
                         help='A space-separated list of tickers to analyze.')
     parser.add_argument(
-        '--model', 
+        '--model', '-m',
+        metavar='MODEL',
         type=str, 
         default='ensemble', 
         choices=['ensemble', 'xgb', 'rf'],
-        help="Specify the model to run: 'ensemble' (XGB+Transformer), 'xgb' (XGBoost only), or 'rf' (Random Forest only)."
+        help="Model to run: 'ensemble' (XGB+Transformer), 'xgb' (XGBoost only), or 'rf' (Random Forest only)."
     )
     args = parser.parse_args()
     
     audit_logger.setup_audit_db()
 
-    tuned_xgb_params = None
-    if os.path.exists('best_xgb_params.json'):
-        print("\n--- Found tuned XGBoost parameters. They will be used for this run. ---")
-        with open('best_xgb_params.json', 'r') as f:
-            tuned_xgb_params = json.load(f)
 
     for ticker in args.tickers:
         print(f"\n{'='*25} Processing Ticker: {ticker} | Model: {args.model.upper()} {'='*25}")
+        # --- UNIFIED PARAMETER LOADING ---
+        tuned_params = {}
+        params_path = Path("results") / "tuning" / f"best_params_{ticker}.json"
+        if params_path.exists():
+            print(f"\n--- Found tuned parameter file for {ticker}: {params_path} ---")
+            with params_path.open("r") as f:
+                tuned_params = json.load(f)
+        
+        # Extract specific params for each model type, defaulting to empty dict if not found
+        tuned_xgb_params = tuned_params.get("xgboost")
+        tuned_transformer_params = tuned_params.get("transformer")
+
         try:
             # Step 1: Load Data
-            data_package = prepare_and_cache_data(ticker, config.START_DATE, config.END_DATE)
+            data_package = prepare_and_cache_data(ticker, settings.data.start_date, settings.data.end_date)
             X_train, y_train = data_package['X_train'], data_package['y_train']
             X_test, y_test_orig = data_package['X_test'], data_package['y_test_orig']
             feature_cols, df_features = data_package['feature_cols'], data_package['df_features']
 
-            # Step 2: Run Monte Carlo simulation (run once, regardless of model)
+            # Step 2: Run Monte Carlo simulation
             print("\n--- Generating Monte-Carlo Signal ---")
             mc_final_signal = {}
             try:
-                mc_filter = predictors.MonteCarloTrendFilter(**config.ADVANCED_MC_PARAMS)
+                mc_params = settings.models.monte_carlo.model_dump(exclude_unset=True)
+                mc_filter = predictors.MonteCarloTrendFilter(**mc_params)
                 mc_filter.fit(df_features) 
                 mc_final_signal = mc_filter.predict(horizon=21)
-                print(f"MC Signal: Trend Strength={mc_final_signal.get('trend_strength', 0):.3f}")
+                print(f"MC Signal: Trend Strength= {mc_final_signal.get('trend_strength', 0):+.3f}")
             except Exception as e:
                 print(f"Could not generate Monte-Carlo signal: {e}")
 
             # --- Step 3: MODEL SELECTION & TRAINING ---
-            final_proba = np.array([]) #"None" aggrevated the linter
+            final_proba = np.array([])
             model_name_log = ""
-            shap_values = np.zeros(len(feature_cols)) # Default SHAP values
+            shap_values = np.zeros(len(feature_cols))
+            run_config = {}
             
             if args.model == 'rf':
                 from sklearn.ensemble import RandomForestClassifier
@@ -80,28 +92,45 @@ def main():
                 final_proba = rf_model.predict_proba(X_test)[:, 1]
                 y_test_final = y_test_orig.values
                 model_name_log = "RandomForest_v1"
-                # Note: Using default zero SHAP for RF
+                run_config = {
+                    "model_type": "rf",
+                    "n_estimators": 100, # Example of RF's static params
+                    "random_state": 42
+                }
 
             elif args.model == 'xgb':
                 print("\n--- Training XGBoost model ---")
-                # Use tuned params if available, otherwise use defaults from config
-                xgb_params_to_use = tuned_xgb_params or config.XGB_PARAMS
+                if tuned_xgb_params:
+                    print("Using tuned XGBoost parameters.")
+                    xgb_params_to_use = tuned_xgb_params
+                else:
+                    print("No tuned XGBoost parameters found, using defaults from config.")
+                    xgb_params_to_use = settings.models.xgboost.model_dump(exclude_unset=True)
                 
                 xgb_model = models.train_xgboost(X_train, y_train, params=xgb_params_to_use)
                 final_proba = xgb_model.predict_proba(X_test)[:, 1]
                 y_test_final = y_test_orig.values
                 shap_values = models.get_shap_importance(xgb_model, X_test)
-                model_name_log = "XGBoost_v1"
+                model_name_log = "XGBoost_v2_Tuned" if tuned_xgb_params else "XGBoost_v2_Default"
+                run_config = {
+                    "model_type": "xgb",
+                    "xgboost_params": xgb_params_to_use
+                }
 
             elif args.model == 'ensemble':
                 print("\n--- Training XGBoost component ---")
-                # Use tuned params if available, otherwise use defaults from config
-                xgb_params_to_use = tuned_xgb_params or config.XGB_PARAMS
-
+                if tuned_xgb_params:
+                    print("Using tuned XGBoost parameters.")
+                    xgb_params_to_use = tuned_xgb_params
+                else:
+                    print("No tuned XGBoost parameters found, using defaults from config.")
+                    xgb_params_to_use = settings.models.xgboost.model_dump(exclude_unset=True)
+                
                 xgb_model = models.train_xgboost(X_train, y_train, params=xgb_params_to_use)
                 xgb_proba = xgb_model.predict_proba(X_test)[:, 1]
                 shap_values = models.get_shap_importance(xgb_model, X_test)
 
+                # --- Transformer Component ---
                 print("\n--- Identifying Top Features for Transformer ---")
                 shap_series = pd.Series(shap_values, index=feature_cols)
                 top_12_features = shap_series.nlargest(12).index.tolist()
@@ -109,18 +138,36 @@ def main():
                 X_train_reduced, X_test_reduced = X_train[top_12_features], X_test[top_12_features]
 
                 print("\n--- Training Transformer component ---")
+                
+                if tuned_transformer_params:
+                    print("Using tuned Transformer parameters.")
+                    # Start with default training params and override/add the tuned ones
+                    trans_training_params = settings.models.transformer_training.model_dump(exclude_unset=True)
+                    trans_training_params.update(tuned_transformer_params)
+                else:
+                    print("No tuned Transformer parameters found, using defaults from config.")
+                    trans_training_params = settings.models.transformer_training.model_dump(exclude_unset=True)
+
                 trans_model, device, scaler, y_seq_test = models.train_transformer(
-                    X_train_reduced.values, y_train.values, X_test_reduced.values, y_test_orig.values
+                    X_train_reduced.values, y_train.values, X_test_reduced.values, y_test_orig.values,
+                    training_params=trans_training_params
                 )
                 trans_proba = models.predict_transformer(
                     trans_model, device, scaler, X_test_reduced.values
                 )[:, 1]
                 
+                # --- Ensemble Prediction ---
                 print("\n--- Creating Ensemble Prediction ---")
                 min_len = min(len(xgb_proba), len(trans_proba))
                 final_proba = (xgb_proba[:min_len] + trans_proba[:min_len]) / 2
                 y_test_final = y_seq_test
-                model_name_log = "Ensemble_v2_CryptoAware"
+                model_name_log = "Ensemble_v3_Tuned" if tuned_xgb_params or tuned_transformer_params else "Ensemble_v3_Default"
+                run_config = {
+                    "model_type": "ensemble",
+                    "xgboost_params": xgb_params_to_use,
+                    "transformer_arch_params": settings.models.transformer_arch.model_dump(exclude_unset=True),
+                    "transformer_training_params": trans_training_params
+                }
 
             # --- Step 4: Common Post-Processing & Logging ---
             predictions = (final_proba > 0.5).astype(int)
@@ -158,8 +205,6 @@ def main():
                 **mc_final_signal
             }
             
-            run_config = {"model_type": args.model, "XGBoost": config.XGB_PARAMS, "Transformer": {**config.TRANSFORMER_PARAMS, **config.TRANSFORMER_TRAINING}}
-
             audit_logger.log_analysis_result(
                 ticker=ticker, model_name=model_name_log, run_config=run_config,
                 predictions={"probabilities": final_proba.tolist()}, metrics=metrics,
@@ -175,6 +220,7 @@ def main():
             continue
 
 if __name__ == '__main__':
+    from rich import print
     start = time.perf_counter()
     main()
     end = time.perf_counter()

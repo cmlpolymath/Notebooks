@@ -7,10 +7,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from xgboost import XGBClassifier
 import shap
-import config
+from config import settings
 from sklearn.preprocessing import StandardScaler
 import copy
-import math # ADDED for PositionalEncoding
+import math
 
 # --- ADDED: Positional Encoding Class ---
 class PositionalEncoding(nn.Module):
@@ -75,10 +75,11 @@ def train_xgboost(X_train, y_train, params: dict | None = None):
     print("Training XGBoost model...")
     # If no specific params are passed, use the defaults from the config file
     if params is None:
-        params = config.XGB_PARAMS
+        params = settings.models.xgboost.model_dump(exclude_unset=True)
         
     xgb_model = XGBClassifier(**params)
     xgb_model.fit(X_train, y_train)
+    xgb_model.get_booster().set_param({'nthread' : os.cpu_count() or 1, "device":"cpu"})  # Use all available CPU threads
     return xgb_model
 
 def get_shap_importance(xgb_model, X_test):
@@ -125,84 +126,118 @@ def prepare_sequences(X, y, window_size: int):
 
     return X_seq, y_seq
 
-def train_transformer(X_train, y_train, X_test, y_test):
+def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | None = None):
     print("Training Transformer model...")
     
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    X_seq_train, y_seq_train = prepare_sequences(X_train_scaled, y_train, config.SEQUENCE_WINDOW_SIZE)
-    X_seq_test, y_seq_test = prepare_sequences(X_test_scaled, y_test, config.SEQUENCE_WINDOW_SIZE)
+    seq_window = settings.models.sequence_window_size
+    X_seq_train, y_seq_train = prepare_sequences(X_train_scaled, y_train, seq_window)
+    X_seq_test, y_seq_test = prepare_sequences(X_test_scaled, y_test, seq_window)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    params = config.TRANSFORMER_PARAMS
-    train_cfg = config.TRANSFORMER_TRAINING
+    model_params = settings.models.transformer_arch.model_dump(exclude_unset=True)
     
+    if training_params is None:
+        train_cfg = settings.models.transformer_training.model_dump(exclude_unset=True)
+    else:
+        train_cfg = training_params
+    
+    # --- GRADIENT ACCUMULATION ---
+    # Get the number of accumulation steps from the config. Default to 1 if not specified.
+    accumulation_steps = train_cfg.get('accumulation_steps', 1)
+    
+    # Adjust batch size if tuned params are too large.
+    # This is a safeguard against OOM even with accumulation.
+    batch_size = min(train_cfg.get('batch_size', 256), 128) # Cap batch size at a safe limit
+    if accumulation_steps > 1:
+        print(f"Using gradient accumulation with {accumulation_steps} steps.")
+        print(f"Physical batch size: {batch_size}, Effective batch size: {batch_size * accumulation_steps}")
+
     model = StockTransformer(
         input_features=X_seq_train.shape[2],
-        d_model=params['d_model'],
-        nhead=params['nhead'],
-        num_layers=params['num_layers'],
-        num_classes=params['num_classes'],
-        dropout=0.1
-    )
-    model.to(device)
-    
+        d_model=model_params.get('d_model', 64),
+        nhead=model_params.get('nhead', 4),
+        num_layers=model_params.get('num_layers', 4),
+        num_classes=model_params.get('num_classes', 2),  # Binary classification
+        dropout=model_params.get('dropout', 0.1) 
+    ).to(device)
+        
     try:
         model = torch.compile(model, backend="aot_eager")
         print("Model compiled successfully with 'aot_eager' backend.")
     except Exception as e:
         print(f"Could not compile model, will run in eager mode. Error: {e}")
 
-
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg['lr'])
-    
-    # ADDED: Use ReduceLROnPlateau scheduler for better learning rate management
-    # The 'verbose' argument was removed in newer PyTorch versions.
+    optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.get('lr', 1e-4), weight_decay=train_cfg.get('weight_decay', 1e-5))
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2, factor=0.5)
 
     train_dataset = TensorDataset(torch.tensor(X_seq_train, dtype=torch.float32), torch.tensor(y_seq_train, dtype=torch.long))
     val_dataset = TensorDataset(torch.tensor(X_seq_test, dtype=torch.float32), torch.tensor(y_seq_test, dtype=torch.long))
     
-    train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=True, pin_memory=True, num_workers=min(4, os.cpu_count() or 1))    
-    val_loader = DataLoader(val_dataset, batch_size=train_cfg['batch_size'] * 2, pin_memory=True, num_workers=min(4, os.cpu_count() or 1))
+    # Use the potentially smaller, safer batch size
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=min(4, os.cpu_count() or 1))    
+    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, pin_memory=True, num_workers=min(4, os.cpu_count() or 1))
 
     scaler_amp = torch.amp.GradScaler(device.type, enabled=(device.type == 'cuda'))
     
     best_val_loss = float('inf')
     epochs_no_improve = 0
-    patience = train_cfg['patience']
+    patience = train_cfg.get('patience', 5)
     best_model_wts = copy.deepcopy(model.state_dict())
-
-    for epoch in range(1, train_cfg['epochs'] + 1):
+    
+    epochs = train_cfg.get('epochs', 50)
+    for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0
-        for X_batch, y_batch in train_loader:
+        
+        # --- GRADIENT ACCUMULATION ---
+        # The optimizer is cleared only once at the beginning of the accumulation cycle.
+        optimizer.zero_grad(set_to_none=True)
+
+        for i, (X_batch, y_batch) in enumerate(train_loader):
             X_batch, y_batch = X_batch.to(device, non_blocking=True), y_batch.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
             
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
                 outputs = model(X_batch)
                 loss = criterion(outputs, y_batch)
+                
+                # --- GRADIENT ACCUMULATION ---
+                # Normalize the loss by the number of accumulation steps.
+                # This ensures the magnitude of the final accumulated gradient is correct.
+                loss = loss / accumulation_steps
             
             if torch.isnan(loss):
                 print(f"Epoch {epoch}: Loss is NaN. Stopping training.")
                 model.load_state_dict(best_model_wts)
                 return model, device, scaler, y_seq_test
 
+            # Accumulate the scaled loss
             scaler_amp.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler_amp.step(optimizer)
-            scaler_amp.update()
             
-            total_loss += loss.item()
+            total_loss += loss.item() * accumulation_steps # Un-scale for logging
+
+            # --- GRADIENT ACCUMULATION ---
+            # Perform the optimizer step only after accumulating gradients for `accumulation_steps` batches.
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
+                # Clip gradients to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                # Update the model weights
+                scaler_amp.step(optimizer)
+                scaler_amp.update()
+                
+                # Clear the gradients for the next accumulation cycle
+                optimizer.zero_grad(set_to_none=True)
             
         avg_train_loss = total_loss / len(train_loader)
         
+        # --- Validation loop ---
         model.eval()
         total_val_loss = 0
         with torch.no_grad():
@@ -215,7 +250,7 @@ def train_transformer(X_train, y_train, X_test, y_test):
         
         avg_val_loss = total_val_loss / len(val_loader)
         
-        print(f"Epoch {epoch}/{train_cfg['epochs']} -> Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
+        print(f"Epoch {epoch}/{epochs} -> Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
         
         scheduler.step(avg_val_loss)
 
@@ -239,11 +274,15 @@ def predict_transformer(model, device, scaler, X_test):
     """Generates predictions from a trained transformer model."""
     model.eval()
     
+    seq_window = settings.models.sequence_window_size
     X_test_scaled = scaler.transform(X_test)
-    X_seq_test, _ = prepare_sequences(X_test_scaled, np.zeros(len(X_test_scaled)), config.SEQUENCE_WINDOW_SIZE)
+    X_seq_test, _ = prepare_sequences(X_test_scaled, np.zeros(len(X_test_scaled)), seq_window)
 
     test_dataset = TensorDataset(torch.tensor(X_seq_test, dtype=torch.float32))
-    test_loader = DataLoader(test_dataset, batch_size=config.TRANSFORMER_TRAINING['batch_size'] * 2)
+    # Use a fixed, reasonable batch size for prediction to avoid OOM
+    pred_batch_size = settings.models.transformer_training.batch_size * 2
+    test_loader = DataLoader(test_dataset, batch_size=pred_batch_size)
+
 
     all_probabilities = []
     with torch.no_grad():

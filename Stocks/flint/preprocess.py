@@ -8,7 +8,7 @@ import pandas as pd
 import argparse
 
 # Import project modules
-import config
+from config import settings
 import data_handler
 from feature_engineering import FeatureCalculator
 import models
@@ -32,7 +32,7 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
     
     print("\n--- Checking yfinance Macroeconomic Data Cache ---")
     macro_dfs_yf = {}
-    for name, macro_ticker in config.MACRO_TICKERS.items():
+    for name, macro_ticker in settings.features.macro_tickers_yf.items():
         macro_dfs_yf[name] = data_handler.get_stock_data(
             ticker=macro_ticker, start_date=start_date, end_date=end_date, force_redownload=force_reprocess
         )
@@ -58,9 +58,11 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
     if df_raw is None or len(df_raw) < 350:
         raise ValueError(f"Insufficient raw data for {ticker} (need ~350 days).")
     
-    market_df = data_handler.get_stock_data(ticker=config.MARKET_INDEX_TICKER, start_date=start_date, end_date=end_date)
+    market_df = data_handler.get_stock_data(ticker=settings.data.market_index_ticker,
+                                            start_date=start_date,
+                                            end_date=end_date)
     if market_df is None:
-        raise ValueError(f"Could not load market index data for {config.MARKET_INDEX_TICKER}.")
+        raise ValueError(f"Could not load market index data for {settings.data.market_index_ticker}.")
 
     # --- MODIFIED: Load Sector Data only for non-crypto assets ---
     sector_df = None
@@ -71,8 +73,8 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
         try:
             info = data_handler.get_ticker_info(ticker)
             sector = info.get('sector')
-            if sector and sector in config.SECTOR_ETF_MAP:
-                sector_ticker = config.SECTOR_ETF_MAP[sector]
+            if sector and sector in settings.features.sector_etf_map:
+                sector_ticker = settings.features.sector_etf_map[sector]
                 print(f"Stock in '{sector}' sector. Fetching data for ETF: {sector_ticker}")
                 sector_df = data_handler.get_stock_data(ticker=sector_ticker, start_date=start_date, end_date=end_date)
             else:
@@ -94,7 +96,7 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
     df_features.dropna(inplace=True)
 
     # --- Check data length AFTER feature engineering and BEFORE splitting ---
-    min_required_rows = config.SEQUENCE_WINDOW_SIZE + 100 # e.g., 60 + 100 = 160
+    min_required_rows = settings.models.sequence_window_size + 100 # e.g., 60 + 100 = 160
     if len(df_features) < min_required_rows:
         raise ValueError(
             f"Insufficient data for {ticker} after feature engineering. "
@@ -110,18 +112,18 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
     df_model.dropna(inplace=True)
 
     # Step 4: Split data
-    train_size = int(len(df_model) * config.TRAIN_SPLIT_RATIO)
+    train_size = int(len(df_model) * settings.models.train_split_ratio)
     train_df = df_model.iloc[:train_size]
     test_df = df_model.iloc[train_size:]
 
     # Ensure only available columns are used
-    feature_cols = [col for col in config.FEATURE_COLS if col in df_model.columns]
+    feature_cols = [col for col in settings.features.get_all_feature_names() if col in df_model.columns]
     X_train, y_train = train_df[feature_cols], train_df['UpNext']
     X_test, y_test_orig = test_df[feature_cols], test_df['UpNext']
 
     # Step 5: Prepare sequences for Transformer
-    X_seq_train, y_seq_train = models.prepare_sequences(X_train.values, y_train.values, config.SEQUENCE_WINDOW_SIZE)
-    X_seq_test, y_seq_test = models.prepare_sequences(X_test.values, y_test_orig.values, config.SEQUENCE_WINDOW_SIZE)
+    X_seq_train, y_seq_train = models.prepare_sequences(X_train.values, y_train.values, settings.models.sequence_window_size)
+    X_seq_test, y_seq_test = models.prepare_sequences(X_test.values, y_test_orig.values, settings.models.sequence_window_size)
     
     # Step 6: Package and cache
     data_package = {
@@ -145,7 +147,7 @@ if __name__ == '__main__':
         try:
             print(f"\n--- Preprocessing {ticker} ---")
             prepare_and_cache_data(
-                ticker=ticker, start_date=config.START_DATE, end_date=config.END_DATE, force_reprocess=True
+                ticker=ticker, start_date=settings.data.start_date, end_date=settings.data.end_date, force_reprocess=True
             )
         except Exception as e:
             print(f"!!! FAILED to preprocess {ticker}: {e}")

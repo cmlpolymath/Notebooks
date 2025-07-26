@@ -15,11 +15,10 @@ from pathlib import Path
 
 # --- Import project modules ---
 import data_handler
-import config
+from config import settings
 from feature_engineering import FeatureCalculator
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("flint")
 
 # --- Helper to format large numbers ---
 def format_large_number(num):
@@ -248,8 +247,13 @@ def load_run_data(ticker: str, model_name: str):
     
     feature_importance = pd.Series(data=shap_data.get('values', []), index=shap_data.get('features', []))
     
-    df_raw = data_handler.get_stock_data(ticker=ticker, start_date=config.START_DATE, end_date=config.END_DATE)
-    market_df = data_handler.get_stock_data(ticker=config.MARKET_INDEX_TICKER, start_date=config.START_DATE, end_date=config.END_DATE)
+    df_raw = data_handler.get_stock_data(ticker=ticker,
+                                         start_date=settings.data.start_date,
+                                         end_date=settings.data.end_date)
+    market_df = data_handler.get_stock_data(
+        ticker=settings.data.market_index_ticker,
+        start_date=settings.data.start_date,
+        end_date=settings.data.end_date)
     
     df_features = FeatureCalculator(df_raw).add_all_features(market_df=market_df)
     df_features['Date'] = pd.to_datetime(df_features['Date'])
@@ -261,7 +265,7 @@ def load_run_data(ticker: str, model_name: str):
     df_model['UpNext'] = (future_price > future_ma).astype(int)
     df_model.dropna(inplace=True)
     
-    train_size = int(len(df_model) * config.TRAIN_SPLIT_RATIO)
+    train_size = int(len(df_model) * settings.models.train_split_ratio)
     test_df = df_model.iloc[train_size:]
     
     num_predictions = len(predictions_data.get('probabilities', []))

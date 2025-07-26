@@ -5,15 +5,16 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score
-from sklearn.ensemble import RandomForestClassifier # ADDED for 'rf' option
+from sklearn.ensemble import RandomForestClassifier
 import torch
+from rich import print
 
 # Import project modules
-import config
+from config import settings
 import models
 import data_handler
 from preprocess import prepare_and_cache_data
-from feature_engineering import FeatureCalculator # ADDED to re-run feature engineering on filtered data
+from feature_engineering import FeatureCalculator
 
 def run_walk_forward_validation(ticker: str, years: int, model_type: str):
     """
@@ -37,7 +38,7 @@ def run_walk_forward_validation(ticker: str, years: int, model_type: str):
         print(f"Loading data from {start_str} to {end_str}...")
         
         df_raw = data_handler.get_stock_data(ticker, start_str, end_str)
-        market_df = data_handler.get_stock_data(config.MARKET_INDEX_TICKER, start_str, end_str)
+        market_df = data_handler.get_stock_data(settings.data.market_index_ticker, start_str, end_str)
 
         if df_raw is None or market_df is None or len(df_raw) < 252:
             raise ValueError("Insufficient data for the specified period.")
@@ -47,15 +48,17 @@ def run_walk_forward_validation(ticker: str, years: int, model_type: str):
         try:
             info = data_handler.get_ticker_info(ticker)
             sector = info.get('sector')
-            if sector and sector in config.SECTOR_ETF_MAP:
-                sector_ticker = config.SECTOR_ETF_MAP[sector]
+            if sector and sector in settings.features.sector_etf_map:
+                sector_ticker = settings.features.sector_etf_map[sector]
                 sector_df = data_handler.get_stock_data(sector_ticker, start_str, end_str)
         except Exception as e:
             print(f"Warning: Failed to load sector data during validation. Error: {e}")
 
         macro_dfs_yf = {}
-        for name, macro_ticker in config.MACRO_TICKERS.items():
-            macro_dfs_yf[name] = data_handler.get_stock_data(macro_ticker, start_str, end_str)
+        for name, macro_ticker in settings.features.macro_tickers_yf.items():
+            macro_dfs_yf[name] = data_handler.get_stock_data(
+                ticker=macro_ticker, start_date=start_str, end_date=end_str, force_redownload=False
+            )
 
         df_macro_fred = None
         try:
@@ -101,7 +104,7 @@ def run_walk_forward_validation(ticker: str, years: int, model_type: str):
     all_true = []
     fold_num = 0
     
-    feature_cols = [col for col in config.FEATURE_COLS if col in df_model.columns]
+    feature_cols = [col for col in settings.features.get_all_feature_names() if col in df_model.columns]
 
     # 3. Loop through the data, creating folds
     start_idx = 0
