@@ -474,7 +474,7 @@ class Settings(OptimizedBaseModel):
                 setattr(self, key, value)
         
         # Re-configure logging AFTER applying overrides to ensure the correct levels are used.
-        self.configure_logging()
+        # self.configure_logging()
         
     def reload_from_file(self, config_path: str) -> None:
         """Reload configuration from file for dynamic updates."""
@@ -519,7 +519,7 @@ class Settings(OptimizedBaseModel):
 # ==============================================================================
 
 # Initialize with environment-specific settings
-settings = Settings()
+settings = Settings(environment='development')
 
 
 # Logging is now automatically configured in Settings.__post_init__

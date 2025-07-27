@@ -198,16 +198,24 @@ def main():
                 print(f"   -> Suggested Stop-Loss: ~{stop_loss:.2f}")
                 print(f"   -> Suggested Take-Profit: ~{take_profit:.2f}")
 
+            # get the actual pd.Index (the dates) for the test predictions
+            num_predictions = len(final_proba)
+            test_index_for_log = pd.DatetimeIndex(data_package['test_df']['Date'].tail(num_predictions))
+
             # Logging
             metrics = {
                 "accuracy": accuracy, "kelly_fraction": kelly_fraction, 'verdict': verdict,
                 'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
                 **mc_final_signal
             }
-            
+
             audit_logger.log_analysis_result(
-                ticker=ticker, model_name=model_name_log, run_config=run_config,
-                predictions={"probabilities": final_proba.tolist()}, metrics=metrics,
+                ticker=ticker, 
+                model_name=model_name_log, 
+                run_config=run_config,
+                predictions={"probabilities": final_proba.tolist()}, 
+                test_index=test_index_for_log,
+                metrics=metrics,
                 shap_importance={'features': feature_cols, 'values': shap_values.tolist()}
             )
             print(f"Analysis for {ticker} using {model_name_log} complete. Results logged.")
@@ -220,7 +228,6 @@ def main():
             continue
 
 if __name__ == '__main__':
-    from rich import print
     start = time.perf_counter()
     main()
     end = time.perf_counter()

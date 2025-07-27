@@ -5,6 +5,7 @@ from datetime import datetime
 import git
 from pathlib import Path
 import numpy as np
+import pandas as pd
 import optuna
 
 DB_PATH = Path('results/audit_log.duckdb')
@@ -58,7 +59,13 @@ def numpy_safe_json_serializer(obj):
     # If the type is not recognized, let the default encoder raise the TypeError
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
-def log_analysis_result(ticker: str, model_name: str, run_config: dict, predictions: dict, metrics: dict, shap_importance: dict):
+def log_analysis_result(ticker: str,
+                        model_name: str,
+                        run_config: dict,
+                        predictions: dict,
+                        test_index: pd.Index,
+                        metrics: dict,
+                        shap_importance: dict):
     """Logs the results of a single analysis run to the database."""
     
     # --- THE DEFINITIVE FIX ---
@@ -70,9 +77,14 @@ def log_analysis_result(ticker: str, model_name: str, run_config: dict, predicti
         execution_timestamp = datetime.now()
         git_hash = get_git_hash()
         
+        predictions_payload = {
+            "probabilities": predictions.get("probabilities", []),
+            "dates": test_index.strftime('%Y-%m-%d').tolist()
+        }
+        
         # Serialize dicts to JSON strings for storage
         config_json = json.dumps(run_config, default=numpy_safe_json_serializer)
-        predictions_json = json.dumps(predictions, default=numpy_safe_json_serializer)
+        predictions_json = json.dumps(predictions_payload, default=numpy_safe_json_serializer)
         metrics_json = json.dumps(metrics, default=numpy_safe_json_serializer)
         shap_json = json.dumps(shap_importance, default=numpy_safe_json_serializer)
         
