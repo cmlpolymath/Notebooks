@@ -83,20 +83,20 @@ def main():
             model_name_log = ""
             shap_values = np.zeros(len(feature_cols))
             run_config = {}
-            
+
             if args.model == 'rf':
-                from sklearn.ensemble import RandomForestClassifier
                 print("\n--- Training Random Forest model ---")
-                rf_model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
-                rf_model.fit(X_train, y_train)
-                final_proba = rf_model.predict_proba(X_test)[:, 1]
+                rf_model, scaler, selector, interaction_func, run_config = models.train_enhanced_random_forest(
+                    X_train, y_train
+                )
+                X_test_scaled = scaler.transform(X_test)
+                X_test_interactions, _ = interaction_func(X_test_scaled, X_train.columns.tolist())
+                X_test_selected = selector.transform(X_test_interactions)
+
+                # 3. Generate predictions
+                final_proba = rf_model.predict_proba(X_test_selected)[:, 1]
                 y_test_final = y_test_orig.values
-                model_name_log = "RandomForest_v1"
-                run_config = {
-                    "model_type": "rf",
-                    "n_estimators": 100, # Example of RF's static params
-                    "random_state": 42
-                }
+                model_name_log = "RandomForest_ADASYN_Finance"
 
             elif args.model == 'xgb':
                 print("\n--- Training XGBoost model ---")

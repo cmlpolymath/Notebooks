@@ -6,13 +6,19 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from xgboost import XGBClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.feature_selection import SelectFromModel
+from imblearn.over_sampling import ADASYN
+from sklearn.preprocessing import RobustScaler
+from collections import Counter
 import shap
 from config import settings
 from sklearn.preprocessing import StandardScaler
 import copy
 import math
 
-# --- ADDED: Positional Encoding Class ---
+
 class PositionalEncoding(nn.Module):
     """Injects positional information into the input sequence."""
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
@@ -68,6 +74,143 @@ class StockTransformer(nn.Module):
         return out
 
 # 2. Model Training and Prediction Functions
+def train_enhanced_random_forest(X_train, y_train) -> tuple:
+    """
+    Trains a robust Random Forest classifier using a sophisticated pipeline.
+
+    This pipeline includes:
+    1.  Robust scaling to handle outliers.
+    2.  ADASYN over-sampling to address class imbalance.
+    3.  Domain-specific feature engineering.
+    4.  Model-based feature selection.
+    5.  Hyperparameter tuning with RandomizedSearchCV.
+
+    All parameters are controlled via the central config file.
+
+    Args:
+        X_train (pd.DataFrame): Training feature data.
+        y_train (pd.Series): Training target data.
+
+    Returns:
+        A tuple containing:
+        - The final trained model object.
+        - The fitted scaler object.
+        - The fitted feature selector object.
+        - A dictionary of metadata for logging.
+    """
+    print("\n--- Training Enhanced Random Forest with ADASYN Pipeline ---")
+
+    # Load configuration from the central settings object
+    cfg = settings.models.random_forest
+
+    # 1. Check class imbalance
+    initial_dist = Counter(y_train)
+    print(f"Initial class distribution: {initial_dist}")
+
+    # 2. Time-series aware scaling
+    print("Applying RobustScaler...")
+    scaler = RobustScaler(quantile_range=cfg.scaler_quantile_range)
+    X_train_scaled = scaler.fit_transform(X_train)
+
+    # 3. ADASYN for class imbalance
+    print("Applying ADASYN for minority class synthesis...")
+    ada = ADASYN(
+        sampling_strategy=cfg.adasyn_sampling_strategy,
+        n_neighbors=cfg.adasyn_neighbors,
+        random_state=42
+    )
+    X_resampled, y_resampled = ada.fit_resample(X_train_scaled, y_train)
+    resampled_dist = Counter(y_resampled)
+    print(f"Resampled class distribution: {resampled_dist}")
+
+    # 4. Domain-specific feature engineering
+    print("Creating financial interaction features...")
+    feature_names = X_train.columns.tolist()
+    
+    # This internal function is safer as it operates on indices
+    def _add_financial_interactions(X, names):
+        X_out = X.copy()
+        new_names = []
+        # Price-volume interactions
+        if 'Volume' in names and 'Close' in names:
+            vol_idx = names.index('Volume')
+            close_idx = names.index('Close')
+            price_vol = X[:, close_idx] * X[:, vol_idx]
+            X_out = np.hstack((X_out, price_vol.reshape(-1, 1)))
+            new_names.append('Price_x_Volume')
+
+        # Momentum-volatility interaction
+        if 'RSI14' in names and 'ATR14' in names:
+            rsi_idx = names.index('RSI14')
+            atr_idx = names.index('ATR14')
+            mom_vol = X[:, rsi_idx] / (X[:, atr_idx] + 1e-8)
+            X_out = np.hstack((X_out, mom_vol.reshape(-1, 1)))
+            new_names.append('RSI_div_ATR')
+        
+        return X_out, new_names
+
+    X_resampled, new_feature_names = _add_financial_interactions(X_resampled, feature_names)
+    final_feature_names = feature_names + new_feature_names
+
+    # 5. Model-based feature selection
+    print("Selecting most predictive features...")
+    selector = SelectFromModel(
+        estimator=RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+        max_features=cfg.feature_selection_max_features,
+        threshold=cfg.feature_selection_threshold
+    )
+    X_selected = selector.fit_transform(X_resampled, y_resampled)
+    
+    # Get the names of the selected features
+    selected_indices = selector.get_support(indices=True)
+    selected_feature_names = [final_feature_names[i] for i in selected_indices]
+    print(f"Selected {X_selected.shape[1]} features: {selected_feature_names}")
+
+    # 6. Hyperparameter tuning with RandomizedSearchCV
+    print("Tuning hyperparameters with RandomizedSearchCV...")
+    rf_base = RandomForestClassifier(
+        n_estimators=cfg.base_n_estimators,
+        max_depth=cfg.base_max_depth,
+        min_samples_leaf=cfg.base_min_samples_leaf,
+        max_features=cfg.base_max_features,
+        n_jobs=-1,
+        random_state=42,
+        oob_score=True # Enable OOB score for model evaluation
+    )
+
+    rf_tuner = RandomizedSearchCV(
+        estimator=rf_base,
+        param_distributions=cfg.param_distributions,
+        n_iter=cfg.hyperparam_tuning_iterations,
+        cv=cfg.hyperparam_tuning_cv_folds,
+        scoring='roc_auc',
+        n_jobs=-1,
+        verbose=1,
+        random_state=42
+    )
+    rf_tuner.fit(X_selected, y_resampled)
+    best_rf = rf_tuner.best_estimator_
+    
+    print(f"Best Parameters found: {rf_tuner.best_params_}")
+    print(f"Best OOB Score: {best_rf.oob_score_:.4f}")
+
+    # 7. Prepare metadata for logging
+    run_config = {
+        "model_type": "RandomForest_ADASYN_Finance",
+        "best_params": rf_tuner.best_params_,
+        "features_selected_count": X_selected.shape[1],
+        "selected_feature_names": selected_feature_names,
+        "oob_score": best_rf.oob_score_,
+        "class_distribution_initial": dict(initial_dist),
+        "class_distribution_resampled": dict(resampled_dist),
+        "sampling_strategy": "ADASYN",
+        "config_params": cfg.model_dump() # Log the config used
+    }
+
+    # The final model is already trained by RandomizedSearchCV on the full data
+    # when refit=True (the default). No need to call .fit() again.
+    return best_rf, scaler, selector, _add_financial_interactions, run_config
+
 def train_xgboost(X_train, y_train, params: dict | None = None):
     """
     Trains an XGBoost model using either provided parameters or defaults from config.
@@ -182,7 +325,7 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
     
     # Use the potentially smaller, safer batch size
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=min(4, os.cpu_count() or 1))    
-    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, pin_memory=True, num_workers=min(4, os.cpu_count() or 1))
+    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, pin_memory=True, num_workers=min(0, os.cpu_count() or 1))
 
     scaler_amp = torch.amp.GradScaler(device.type, enabled=(device.type == 'cuda'))
     

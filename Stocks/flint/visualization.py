@@ -525,7 +525,7 @@ def create_app(ticker: str) -> dash.Dash:
         
         # Footer
         html.Hr(),
-        html.P("Powered by Flint Analytics", className="text-center text-muted small")
+        html.P("Powered by cml_polymath", className="text-center text-muted small")
         
     ], fluid=True, className="py-4")
     

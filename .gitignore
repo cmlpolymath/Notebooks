@@ -10,3 +10,5 @@ __pycache__
 **/*.duckdb
 **/*.log
 **/*__duckdb_optuna__code.md
+*million-dollar*
+*profile_report*

@@ -18,6 +18,7 @@ import json
 # ==============================================================================
 
 class ModelType(str, Enum):
+    RF = "randomforest"
     XGBOOST = "xgboost"
     TRANSFORMER = "transformer"
     ENSEMBLE = "ensemble"
@@ -111,6 +112,40 @@ class DataConfig(OptimizedBaseModel):
 # ==============================================================================
 # MODEL CONFIGURATIONS
 # ==============================================================================
+
+class RandomForestParams(OptimizedBaseModel):
+    """Enhanced Random Forest parameters for financial data."""
+    
+    # Preprocessing
+    scaler_quantile_range: Tuple[int, int] = Field(default=(5, 95), description="Quantile range for RobustScaler")
+    
+    # ADASYN Resampling
+    adasyn_sampling_strategy: str = Field(default='minority', description="ADASYN sampling strategy")
+    adasyn_neighbors: int = Field(default=5, ge=1, description="Number of neighbors for ADASYN")
+    
+    # Feature Selection
+    feature_selection_max_features: int = Field(default=15, ge=5, le=50, description="Max features to select")
+    feature_selection_threshold: str = Field(default='1.25*median', description="Threshold for feature selection from model")
+    
+    # RandomizedSearchCV Hyperparameter Tuning
+    hyperparam_tuning_iterations: int = Field(default=25, ge=1, description="Number of iterations for RandomizedSearchCV")
+    hyperparam_tuning_cv_folds: int = Field(default=3, ge=2, description="Number of cross-validation folds")
+    
+    # Base Estimator for Tuning
+    base_n_estimators: int = Field(default=500, ge=100)
+    base_max_depth: int = Field(default=15, ge=5)
+    base_min_samples_leaf: int = Field(default=5, ge=1)
+    base_max_features: float = Field(default=0.5, gt=0, le=1.0)
+    
+    # Search Space for Hyperparameters (as a dictionary)
+    param_distributions: Dict[str, List] = Field(default_factory=lambda: {
+        'n_estimators': [300, 500, 700],
+        'max_depth': [10, 15, 20, None],
+        'min_samples_split': [5, 10, 15],
+        'min_samples_leaf': [3, 5, 7],
+        'max_features': ['sqrt', 0.5, 0.3],
+        'max_samples': [0.6, 0.7]
+    })
 
 class XGBoostParams(OptimizedBaseModel):
     """Optimized XGBoost parameters for financial data."""
@@ -232,6 +267,7 @@ class ModelConfig(OptimizedBaseModel):
     min_train_size: int = Field(default=1000, ge=252, description="Minimum training samples")
     
     # Model instances
+    random_forest: RandomForestParams = Field(default_factory=RandomForestParams)
     xgboost: XGBoostParams = Field(default_factory=XGBoostParams)
     transformer_arch: TransformerArchParams = Field(default_factory=TransformerArchParams)
     transformer_training: TransformerTrainingParams = Field(default_factory=TransformerTrainingParams)
