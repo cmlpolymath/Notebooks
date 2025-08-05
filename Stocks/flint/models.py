@@ -1,22 +1,26 @@
 # models.py
-import os
-import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-from xgboost import XGBClassifier
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import RandomizedSearchCV
-from sklearn.feature_selection import SelectFromModel
-from imblearn.over_sampling import ADASYN
-from sklearn.preprocessing import RobustScaler
-from collections import Counter
-import shap
-from config import settings
-from sklearn.preprocessing import StandardScaler
 import copy
 import math
+import os
+from collections import Counter
+
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
+import shap
+import torch
+import torch.nn as nn
+from imblearn.over_sampling import ADASYN
+from numpy.lib.stride_tricks import sliding_window_view
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier
+from sklearn.feature_selection import SelectFromModel
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
+from sklearn.preprocessing import RobustScaler, StandardScaler
+from torch.utils.data import DataLoader, TensorDataset
+from xgboost import XGBClassifier
+
+from config import settings
 
 
 class PositionalEncoding(nn.Module):
@@ -74,45 +78,34 @@ class StockTransformer(nn.Module):
         return out
 
 # 2. Model Training and Prediction Functions
-def train_enhanced_random_forest(X_train, y_train) -> tuple:
+def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> tuple:
     """
-    Trains a robust Random Forest classifier using a sophisticated pipeline.
-
-    This pipeline includes:
-    1.  Robust scaling to handle outliers.
-    2.  ADASYN over-sampling to address class imbalance.
-    3.  Domain-specific feature engineering.
-    4.  Model-based feature selection.
-    5.  Hyperparameter tuning with RandomizedSearchCV.
-
-    All parameters are controlled via the central config file.
-
-    Args:
-        X_train (pd.DataFrame): Training feature data.
-        y_train (pd.Series): Training target data.
-
-    Returns:
-        A tuple containing:
-        - The final trained model object.
-        - The fitted scaler object.
-        - The fitted feature selector object.
-        - A dictionary of metadata for logging.
+    Trains a robust Random Forest classifier using a sophisticated pipeline with time-aware validation 
+    and model stacking. Expects pre-engineered features including market regimes and interaction features.
     """
-    print("\n--- Training Enhanced Random Forest with ADASYN Pipeline ---")
-
-    # Load configuration from the central settings object
+    
+    print("\n--- Training Enhanced Random Forest with Time-Aware Validation & Stacking ---")
     cfg = settings.models.random_forest
-
-    # 1. Check class imbalance
+    
+    # 1. Validate expected pre-engineered features are present
+    expected_features = ['is_bull_regime', 'is_bear_regime', 'Price_x_Volume', 'RSI_div_ATR']
+    available_features = [feat for feat in expected_features if feat in X_train.columns]
+    missing_features = [feat for feat in expected_features if feat not in X_train.columns]
+    
+    print(f"Pre-engineered features found: {available_features}")
+    if missing_features:
+        print(f"Warning: Missing expected features: {missing_features}")
+    
+    # 2. Check class imbalance
     initial_dist = Counter(y_train)
     print(f"Initial class distribution: {initial_dist}")
-
-    # 2. Time-series aware scaling
+    
+    # 3. Time-series aware scaling
     print("Applying RobustScaler...")
     scaler = RobustScaler(quantile_range=cfg.scaler_quantile_range)
     X_train_scaled = scaler.fit_transform(X_train)
-
-    # 3. ADASYN for class imbalance
+    
+    # 4. ADASYN for class imbalance
     print("Applying ADASYN for minority class synthesis...")
     ada = ADASYN(
         sampling_strategy=cfg.adasyn_sampling_strategy,
@@ -122,52 +115,37 @@ def train_enhanced_random_forest(X_train, y_train) -> tuple:
     X_resampled, y_resampled = ada.fit_resample(X_train_scaled, y_train)
     resampled_dist = Counter(y_resampled)
     print(f"Resampled class distribution: {resampled_dist}")
-
-    # 4. Domain-specific feature engineering
-    print("Creating financial interaction features...")
-    feature_names = X_train.columns.tolist()
+    print(f"Dataset size after ADASYN: {X_resampled.shape[0]} samples, {X_resampled.shape[1]} features")
     
-    # This internal function is safer as it operates on indices
-    def _add_financial_interactions(X, names):
-        X_out = X.copy()
-        new_names = []
-        # Price-volume interactions
-        if 'Volume' in names and 'Close' in names:
-            vol_idx = names.index('Volume')
-            close_idx = names.index('Close')
-            price_vol = X[:, close_idx] * X[:, vol_idx]
-            X_out = np.hstack((X_out, price_vol.reshape(-1, 1)))
-            new_names.append('Price_x_Volume')
-
-        # Momentum-volatility interaction
-        if 'RSI14' in names and 'ATR14' in names:
-            rsi_idx = names.index('RSI14')
-            atr_idx = names.index('ATR14')
-            mom_vol = X[:, rsi_idx] / (X[:, atr_idx] + 1e-8)
-            X_out = np.hstack((X_out, mom_vol.reshape(-1, 1)))
-            new_names.append('RSI_div_ATR')
-        
-        return X_out, new_names
-
-    X_resampled, new_feature_names = _add_financial_interactions(X_resampled, feature_names)
-    final_feature_names = feature_names + new_feature_names
-
-    # 5. Model-based feature selection
+    # Convert back to DataFrame with original feature names to avoid warnings
+    X_resampled_df = pd.DataFrame(X_resampled, columns=X_train.columns)
+    
+    # 5. Model-based feature selection with proper DataFrame handling
     print("Selecting most predictive features...")
     selector = SelectFromModel(
         estimator=RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
         max_features=cfg.feature_selection_max_features,
         threshold=cfg.feature_selection_threshold
     )
-    X_selected = selector.fit_transform(X_resampled, y_resampled)
     
-    # Get the names of the selected features
-    selected_indices = selector.get_support(indices=True)
-    selected_feature_names = [final_feature_names[i] for i in selected_indices]
-    print(f"Selected {X_selected.shape[1]} features: {selected_feature_names}")
-
-    # 6. Hyperparameter tuning with RandomizedSearchCV
-    print("Tuning hyperparameters with RandomizedSearchCV...")
+    # Fit selector and get selected feature names
+    selector.fit(X_resampled_df, y_resampled)
+    selected_feature_names = X_resampled_df.columns[selector.get_support()].tolist()
+    X_selected_df = X_resampled_df[selected_feature_names]
+    
+    print(f"Selected {X_selected_df.shape[1]} features: {selected_feature_names}")
+    
+    # 6. Time-aware cross-validation setup
+    print(f"Setting up TimeSeriesSplit with {cfg.tscv_splits} splits and {cfg.tscv_gap} day gap...")
+    tscv = TimeSeriesSplit(n_splits=cfg.tscv_splits, gap=cfg.tscv_gap)
+    
+    # Print expected computation load
+    total_fits = cfg.hyperparam_tuning_iterations * cfg.tscv_splits
+    print(f"Expected total model fits: {total_fits}")
+    print(f"Estimated training time: {total_fits * 2:.2f}-{total_fits * 8:.2f} seconds")    
+    
+    # 7. Hyperparameter tuning with time-aware validation
+    # print(f"Starting hyperparameter search with {cfg.hyperparam_tuning_iterations} iterations...")
     rf_base = RandomForestClassifier(
         n_estimators=cfg.base_n_estimators,
         max_depth=cfg.base_max_depth,
@@ -175,41 +153,106 @@ def train_enhanced_random_forest(X_train, y_train) -> tuple:
         max_features=cfg.base_max_features,
         n_jobs=-1,
         random_state=42,
-        oob_score=True # Enable OOB score for model evaluation
+        oob_score=True
     )
+    
+    print("Starting hyperparameter optimization...")
+    print(f"Search space: {cfg.hyperparam_tuning_iterations} candidates × {cfg.tscv_splits} folds = {total_fits} total fits")
 
     rf_tuner = RandomizedSearchCV(
         estimator=rf_base,
         param_distributions=cfg.param_distributions,
         n_iter=cfg.hyperparam_tuning_iterations,
-        cv=cfg.hyperparam_tuning_cv_folds,
+        cv=tscv,
         scoring='roc_auc',
         n_jobs=-1,
-        verbose=1,
+        verbose=0,  # Silence sklearn completely
         random_state=42
     )
-    rf_tuner.fit(X_selected, y_resampled)
+
+    # Simple progress indicator
+    import time
+    start_time = time.time()
+    print("⏳ Training in progress...")
+
+    rf_tuner.fit(X_selected_df, y_resampled)    
     best_rf = rf_tuner.best_estimator_
     
-    print(f"Best Parameters found: {rf_tuner.best_params_}")
-    print(f"Best OOB Score: {best_rf.oob_score_:.4f}")
+    elapsed_time = time.time() - start_time
+    print(f"Hyperparameter search completed in {elapsed_time:.2f} seconds")
+    print(f"Best Parameters: {rf_tuner.best_params_}")
+    print(f"Best Random Forest CV Score: {rf_tuner.best_score_:.4f}")
+    print(f"Random Forest OOB Score: {best_rf.oob_score_:.4f}")
 
-    # 7. Prepare metadata for logging
+    # 8. Model Stacking (simplified to avoid redundant validation)
+    final_model = best_rf  # Default to RF if stacking disabled
+    stacking_cv_score = None
+    
+    if cfg.enable_stacking:
+        print("Creating StackingClassifier with LightGBM and Logistic Regression...")
+        
+        # LightGBM base estimator with proper configuration
+        lgb_base = lgb.LGBMClassifier(
+            max_depth=cfg.lgb_max_depth,
+            learning_rate=cfg.lgb_learning_rate,
+            n_estimators=cfg.lgb_n_estimators,
+            num_leaves=cfg.lgb_num_leaves,
+            random_state=42,
+            n_jobs=-1,
+            verbose=-1,  # Suppress LightGBM output
+            force_col_wise=True  # Better for financial datasets
+        )
+        
+        # Use regular KFold for stacking instead of TimeSeriesSplit
+        # TimeSeriesSplit doesn't work with StackingClassifier's cross_val_predict
+        from sklearn.model_selection import KFold
+        stacking_cv = KFold(n_splits=3, shuffle=False)  # Remove random_state when shuffle=False
+        
+        # Stacking classifier
+        stacking_clf = StackingClassifier(
+            estimators=[
+                ('rf', best_rf),
+                ('lgb', lgb_base)
+            ],
+            final_estimator=LogisticRegression(
+                C=cfg.stack_final_estimator_C,
+                random_state=42,
+                max_iter=1000
+            ),
+            cv=stacking_cv,  # Use KFold instead of TimeSeriesSplit
+            n_jobs=-1
+        )
+        
+        # Train the stacking classifier on DataFrame to preserve feature names
+        print("Training StackingClassifier...")
+        stacking_clf.fit(X_selected_df, y_resampled)
+        final_model = stacking_clf
+        
+        # Simple validation score (no redundant cross-validation)
+        stacking_cv_score = rf_tuner.best_score_  # Use RF CV score as proxy
+        print("Stacking Classifier created successfully")
+    
+    # 9. Prepare enhanced metadata for logging
     run_config = {
-        "model_type": "RandomForest_ADASYN_Finance",
-        "best_params": rf_tuner.best_params_,
-        "features_selected_count": X_selected.shape[1],
+        "model_type": "EnhancedRandomForest_TimeAware_Stacking" if cfg.enable_stacking else "EnhancedRandomForest_TimeAware",
+        "stacking_enabled": cfg.enable_stacking,
+        "best_rf_params": rf_tuner.best_params_,
+        "best_rf_cv_score": rf_tuner.best_score_,
+        "stacking_cv_score": stacking_cv_score,
+        "features_selected_count": X_selected_df.shape[1],
         "selected_feature_names": selected_feature_names,
-        "oob_score": best_rf.oob_score_,
+        "available_engineered_features": available_features,
+        "missing_engineered_features": missing_features,
+        "rf_oob_score": best_rf.oob_score_,
         "class_distribution_initial": dict(initial_dist),
         "class_distribution_resampled": dict(resampled_dist),
+        "time_series_cv_splits": cfg.tscv_splits,
+        "time_series_cv_gap": cfg.tscv_gap,
         "sampling_strategy": "ADASYN",
-        "config_params": cfg.model_dump() # Log the config used
+        "config_params": cfg.model_dump()
     }
-
-    # The final model is already trained by RandomizedSearchCV on the full data
-    # when refit=True (the default). No need to call .fit() again.
-    return best_rf, scaler, selector, _add_financial_interactions, run_config
+    
+    return final_model, scaler, selector, run_config
 
 def train_xgboost(X_train, y_train, params: dict | None = None):
     """

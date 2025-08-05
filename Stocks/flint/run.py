@@ -85,19 +85,32 @@ def main():
             run_config = {}
 
             if args.model == 'rf':
-                print("\n--- Training Random Forest model ---")
-                rf_model, scaler, selector, interaction_func, run_config = models.train_enhanced_random_forest(
+                rf_model, scaler, selector, run_config = models.train_enhanced_random_forest(
                     X_train, y_train
                 )
-                X_test_scaled = scaler.transform(X_test)
-                X_test_interactions, _ = interaction_func(X_test_scaled, X_train.columns.tolist())
-                X_test_selected = selector.transform(X_test_interactions)
+                
+                # Fix 1: Maintain DataFrame structure after scaling
+                X_test_scaled = pd.DataFrame(
+                    scaler.transform(X_test),
+                    columns=X_test.columns,
+                    index=X_test.index
+                )
+                
+                # Fix 2: Maintain DataFrame structure after feature selection
+                # Get the selected feature names from the selector
+                selected_feature_mask = selector.get_support()
+                selected_feature_names = X_test.columns[selected_feature_mask].tolist()
+                
+                X_test_selected = pd.DataFrame(
+                    selector.transform(X_test_scaled),
+                    columns=selected_feature_names,
+                    index=X_test_scaled.index
+                )
 
-                # 3. Generate predictions
                 final_proba = rf_model.predict_proba(X_test_selected)[:, 1]
                 y_test_final = y_test_orig.values
-                model_name_log = "RandomForest_ADASYN_Finance"
-
+                model_name_log = run_config["model_type"]       
+                         
             elif args.model == 'xgb':
                 print("\n--- Training XGBoost model ---")
                 if tuned_xgb_params:

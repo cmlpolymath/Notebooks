@@ -1,6 +1,5 @@
 # feature_engineering.py
 import pandas as pd
-from datetime import datetime, date, timedelta
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy.signal import find_peaks
@@ -63,21 +62,30 @@ class FeatureCalculator:
         
         # --- Stage 2: Merge All External Data Sources ---
         print("Merging external data sources...")
-        if market_df is not None: self._add_spy_rsi(market_df); self._add_spy_return(market_df)
-        if sector_df is not None: self._add_sector_rsi(sector_df); self._add_sector_return(sector_df)
-        if macro_dfs_yf: self._add_yf_macro_features(macro_dfs_yf)
-        if df_macro_fred is not None: self._add_fred_macro_features(df_macro_fred)
+        if market_df is not None:
+            self._add_spy_rsi(market_df)
+            self._add_spy_return(market_df)
+        if sector_df is not None:
+            self._add_sector_rsi(sector_df)
+            self._add_sector_return(sector_df)
+        if macro_dfs_yf:
+            self._add_yf_macro_features(macro_dfs_yf)
+        if df_macro_fred is not None:
+            self._add_fred_macro_features(df_macro_fred)
 
         # --- Stage 3: First Robust Fill ---
-        # CRITICAL: Fill all NaNs from merges and initial calculations before creating relational features.
+        # Fill all NaNs from merges and initial calculations before creating relational features.
         self._robust_fill(reason="Post-Merge")
 
         # --- Stage 4: Relational & Interaction Features ---
         # These features depend on the merged data from Stage 2.
+        print("Engineering market regime and interaction features...")
+        self._add_market_regime()
+        self._add_interaction_features()
         self._add_relational_macro_features()
 
         # --- Stage 5: Second Robust Fill ---
-        # CRITICAL: Fill any NaNs created during the relational calculations (e.g., from .corr()).
+        # Fill any NaNs created during the relational calculations (e.g., from .corr()).
         self._robust_fill(reason="Post-Calculation")
 
         # --- Final Cleanup ---
@@ -172,7 +180,9 @@ class FeatureCalculator:
         
     def _add_dominant_period(self, window_size: int = 60, min_period: int = 2):
         n = len(self.df)
-        if n < window_size: self.df['Dominant_Period'] = np.nan; return
+        if n < window_size:
+            self.df['Dominant_Period'] = np.nan
+            return
         close = self.df['Close'].to_numpy(dtype=float)
         windows = sliding_window_view(close, window_shape=window_size)
         windows = windows - windows.mean(axis=1, keepdims=True)
@@ -187,33 +197,39 @@ class FeatureCalculator:
         periods = np.divide(1.0, peak_freqs, out=np.full_like(peak_freqs, np.nan), where=peak_freqs != 0)
         valid = (periods >= min_period) & (periods <= window_size)
         periods[~valid] = np.nan
-        padded = np.full(n, np.nan); padded[window_size - 1 :] = periods
+        padded = np.full(n, np.nan)
+        padded[window_size - 1 :] = periods
         series = pd.Series(padded, index=self.df.index)
         interp = series.interpolate(method='linear', limit_area='inside')
         smooth = interp.rolling(window=3, center=True, min_periods=1).mean()
         self.df['Dominant_Period'] = smooth
 
     def _add_spy_rsi(self, market_df: pd.DataFrame, period=14):
-        market_df_c = market_df.copy(); market_df_c['Date'] = pd.to_datetime(market_df_c['Date'])
+        market_df_c = market_df.copy()
+        market_df_c['Date'] = pd.to_datetime(market_df_c['Date'])
         market_df_calc = market_df_c.set_index('Date')
         delta = market_df_calc['Close'].diff()
-        gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
         avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
         rs = avg_gain / (avg_loss + 1e-9)
-        spy_rsi = 100 - (100 / (1 + rs)); spy_rsi.name = 'SPY_RSI14'
+        spy_rsi = 100 - (100 / (1 + rs))
+        spy_rsi.name = 'SPY_RSI14'
         self.df['Date'] = pd.to_datetime(self.df['Date'])
         self.df = self.df.merge(spy_rsi, on='Date', how='left')
 
     def _add_spy_return(self, market_df: pd.DataFrame):
-        market_df_c = market_df.copy(); market_df_c['Date'] = pd.to_datetime(market_df_c['Date'])
+        market_df_c = market_df.copy()
+        market_df_c['Date'] = pd.to_datetime(market_df_c['Date'])
         market_df_calc = market_df_c.set_index('Date')
         spy_return = market_df_calc['Close'].pct_change() * 100; spy_return.name = 'SPY_Return1'
         self.df['Date'] = pd.to_datetime(self.df['Date'])
         self.df = self.df.merge(spy_return, on='Date', how='left')
 
     def _add_sector_rsi(self, sector_df: pd.DataFrame, period=14):
-        sector_df_c = sector_df.copy(); sector_df_c['Date'] = pd.to_datetime(sector_df_c['Date'])
+        sector_df_c = sector_df.copy()
+        sector_df_c['Date'] = pd.to_datetime(sector_df_c['Date'])
         sector_df_calc = sector_df_c.set_index('Date')
         delta = sector_df_calc['Close'].diff()
         gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
@@ -225,7 +241,8 @@ class FeatureCalculator:
         self.df = self.df.merge(sector_rsi, on='Date', how='left')
 
     def _add_sector_return(self, sector_df: pd.DataFrame):
-        sector_df_c = sector_df.copy(); sector_df_c['Date'] = pd.to_datetime(sector_df_c['Date'])
+        sector_df_c = sector_df.copy()
+        sector_df_c['Date'] = pd.to_datetime(sector_df_c['Date'])
         sector_df_calc = sector_df_c.set_index('Date')
         sector_return = sector_df_calc['Close'].pct_change() * 100; sector_return.name = 'SECTOR_Return1'
         self.df['Date'] = pd.to_datetime(self.df['Date'])
@@ -235,7 +252,8 @@ class FeatureCalculator:
         self.df['Date'] = pd.to_datetime(self.df['Date'])
         for name, df_macro in macro_dfs_yf.items():
             if df_macro is None or df_macro.empty: self.df[name] = np.nan; continue
-            macro_series = df_macro.copy(); macro_series['Date'] = pd.to_datetime(macro_series['Date'])
+            macro_series = df_macro.copy()
+            macro_series['Date'] = pd.to_datetime(macro_series['Date'])
             if 'Close' not in macro_series.columns: continue
             macro_series = macro_series[['Date', 'Close']].rename(columns={'Close': name})
             self.df = pd.merge(self.df, macro_series, on='Date', how='left')
@@ -308,3 +326,45 @@ class FeatureCalculator:
         vwap = (p * v).rolling(window).sum() / v.rolling(window).sum()
         std = p.rolling(window).std()
         self.df['VWAP_Z'] = (p - vwap) / std
+
+    def _add_market_regime(self, short_window=20, long_window=60):
+        if 'Close' not in self.df.columns:
+            print("Skipping regime: no Close column")
+            return
+
+        # 1) compute returns once
+        returns = self.df['Close'].pct_change().fillna(0)
+
+        # 2) generate all regime series
+        def regime_series():
+            short_ma = returns.rolling(short_window, min_periods=1).mean()
+            long_ma  = returns.rolling(long_window,  min_periods=1).mean()
+            yield 'short_ma',      short_ma
+            yield 'long_ma',       long_ma
+            yield 'regime_diff',   short_ma - long_ma
+            yield 'regime_ratio',  short_ma.div(long_ma + 1e-9)
+            yield 'is_bull_regime',(short_ma > long_ma).astype(int)
+            yield 'is_bear_regime',(short_ma <= long_ma).astype(int)
+
+        # 3) assign directly onto self.df
+        for name, series in regime_series():
+            self.df[name] = series
+
+
+    def _add_interaction_features(self):
+        # declarative mapping: new_col -> (required_cols, generator_func)
+        feature_map = {
+            'Price_x_Volume':   (['Close', 'Volume'], lambda df: df['Close'] * df['Volume']),
+            'RSI_div_ATR':      (['RSI14', 'ATR14'],lambda df: df['RSI14'].div(df['ATR14'] + 1e-9)),
+            'Bull_x_RSI':       (['is_bull_regime', 'RSI14'], lambda df: df['is_bull_regime'] * df['RSI14']),
+            'Bear_x_ATR':       (['is_bear_regime', 'ATR14'], lambda df: df['is_bear_regime']  * df['ATR14']),
+            'Vol_x_Dev':        (['Volume', 'Close'],
+                                lambda df: df['Volume'] * df['Close'].pct_change().rolling(10).std().fillna(0)),
+            'Regime_Mom_Ratio': (['is_bull_regime', 'RSI14'],
+                                lambda df: df['is_bull_regime'] * (df['RSI14'] / (df['RSI14'].rolling(5).mean() + 1e-9))
+                                )
+        }
+
+        for col, (reqs, fn) in feature_map.items():
+            if all(rc in self.df.columns for rc in reqs):
+                self.df[col] = fn(self.df)

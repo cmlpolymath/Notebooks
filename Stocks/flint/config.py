@@ -6,7 +6,7 @@ Optimized for speed, interpretability, and dynamic modification.
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Union, Any
+from typing import List, Dict, Optional, Tuple, Any
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
 from functools import lru_cache
@@ -99,7 +99,8 @@ class DataConfig(OptimizedBaseModel):
     # Data quality
     min_trading_days: int = Field(default=252, ge=50, description="Minimum trading days required")
     max_missing_pct: float = Field(default=0.05, ge=0, le=1, description="Maximum missing data percentage")
-    
+    epsilon: int = Field(default=1e-9, description="Small value to avoid division by zero")
+
     @field_validator('start_date', 'end_date')
     @classmethod
     def validate_dates(cls, v):
@@ -113,39 +114,44 @@ class DataConfig(OptimizedBaseModel):
 # MODEL CONFIGURATIONS
 # ==============================================================================
 
+# From: config.py
+# From: config.py
+
 class RandomForestParams(OptimizedBaseModel):
-    """Enhanced Random Forest parameters for financial data."""
+    """Enhanced Random Forest parameters for financial data with time-aware validation and stacking."""
     
-    # Preprocessing
+    # Existing parameters
     scaler_quantile_range: Tuple[int, int] = Field(default=(5, 95), description="Quantile range for RobustScaler")
-    
-    # ADASYN Resampling
     adasyn_sampling_strategy: str = Field(default='minority', description="ADASYN sampling strategy")
     adasyn_neighbors: int = Field(default=5, ge=1, description="Number of neighbors for ADASYN")
-    
-    # Feature Selection
     feature_selection_max_features: int = Field(default=15, ge=5, le=50, description="Max features to select")
     feature_selection_threshold: str = Field(default='1.25*median', description="Threshold for feature selection from model")
-    
-    # RandomizedSearchCV Hyperparameter Tuning
-    hyperparam_tuning_iterations: int = Field(default=25, ge=1, description="Number of iterations for RandomizedSearchCV")
+    hyperparam_tuning_iterations: int = Field(default=10, ge=1, description="Number of iterations for RandomizedSearchCV")  # Reduced from 25
     hyperparam_tuning_cv_folds: int = Field(default=3, ge=2, description="Number of cross-validation folds")
-    
-    # Base Estimator for Tuning
-    base_n_estimators: int = Field(default=500, ge=100)
-    base_max_depth: int = Field(default=15, ge=5)
+    base_n_estimators: int = Field(default=200, ge=100)  # Reduced from 500
+    base_max_depth: int = Field(default=10, ge=5)  # Reduced from 15
     base_min_samples_leaf: int = Field(default=5, ge=1)
     base_max_features: float = Field(default=0.5, gt=0, le=1.0)
-    
-    # Search Space for Hyperparameters (as a dictionary)
     param_distributions: Dict[str, List] = Field(default_factory=lambda: {
-        'n_estimators': [300, 500, 700],
-        'max_depth': [10, 15, 20, None],
-        'min_samples_split': [5, 10, 15],
-        'min_samples_leaf': [3, 5, 7],
-        'max_features': ['sqrt', 0.5, 0.3],
-        'max_samples': [0.6, 0.7]
+        'n_estimators': [100, 200, 300],  # Reduced from [300, 500, 700]
+        'max_depth': [8, 12, 16],  # Reduced from [10, 15, 20, None]
+        'min_samples_split': [5, 10],  # Reduced options
+        'min_samples_leaf': [3, 5],  # Reduced options
+        'max_features': ['sqrt', 0.5],  # Reduced options
+        'max_samples': [0.7]  # Single option
     })
+    
+    # New time-aware validation parameters
+    tscv_splits: int = Field(default=5, ge=3, le=10, description="Number of splits for TimeSeriesSplit")
+    tscv_gap: int = Field(default=5, ge=0, description="Gap between train/test in TimeSeriesSplit to prevent leakage")
+    
+    # Stacking parameters
+    enable_stacking: bool = Field(default=True, description="Whether to use StackingClassifier")
+    lgb_max_depth: int = Field(default=6, ge=3, le=15, description="Max depth for LightGBM base estimator")
+    lgb_learning_rate: float = Field(default=0.1, gt=0, le=1.0, description="Learning rate for LightGBM")
+    lgb_n_estimators: int = Field(default=100, ge=50, le=500, description="Number of estimators for LightGBM")
+    lgb_num_leaves: int = Field(default=31, ge=10, le=100, description="Number of leaves for LightGBM")
+    stack_final_estimator_C: float = Field(default=1.0, gt=0, description="Regularization parameter for stacking LogisticRegression")
 
 class XGBoostParams(OptimizedBaseModel):
     """Optimized XGBoost parameters for financial data."""
@@ -394,6 +400,26 @@ class FeatureConfig(OptimizedBaseModel):
             'Credit_Spread', 'Liquidity_Index'
         ]
         features.extend(relational_features)
+
+        # Market Regime Features
+        regime_features = [
+            'is_bull_regime',
+            'is_bear_regime',
+            'regime_diff',
+            'regime_ratio'
+        ]
+        features.extend(regime_features)
+
+        # Interaction Features
+        interaction_features = [
+            'Price_x_Volume',
+            'RSI_div_ATR',
+            'Bull_x_RSI',
+            'Bear_x_ATR',
+            'Vol_x_Dev',
+            'Regime_Mom_Ratio'
+        ]
+        features.extend(interaction_features)
         
         # Time-based features
         time_features = [
