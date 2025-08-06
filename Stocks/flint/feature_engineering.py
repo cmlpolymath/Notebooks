@@ -2,11 +2,15 @@
 import pandas as pd
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
+from numba import jit
 from scipy.signal import find_peaks
+
+from aggressors import AggressorFeatures
 
 class FeatureCalculator:
     def __init__(self, df):
         self.df = df.copy()
+        self.aggressors = AggressorFeatures()
         for col in self.df.columns:
             if pd.api.types.is_numeric_dtype(self.df[col]):
                 self.df[col].values.flags.writeable = True
@@ -55,10 +59,10 @@ class FeatureCalculator:
         self._add_dominant_period()
         self._add_kalman_filter()
         self._add_realized_vol()
-        self._add_hurst()
-        self._add_fractal_dimension()
         self._add_efficiency_ratio()
         self._add_vwap_zscore()
+        self.df = self.aggressor.add_hurst(self.df, window=100)
+        self.df = self.aggressor.add_fractal_dimension(self.df, window=14)
         
         # --- Stage 2: Merge All External Data Sources ---
         print("Merging external data sources...")
@@ -296,25 +300,6 @@ class FeatureCalculator:
     def _add_realized_vol(self, window: int = 21):
         lr = np.log(self.df['Close']/self.df['Close'].shift(1))
         self.df['RealVol'] = lr.rolling(window).std() * np.sqrt(252)
-    
-    def _add_hurst(self, window=100):
-        # Rolling Hurst Exponent - this is slow
-        def get_hurst(ts):
-            lags = range(2, 50)
-            tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
-            poly = np.polyfit(np.log(lags), np.log(tau), 1)
-            return poly[0]*2.0
-        # To avoid extreme slowness, calculate on expanding window, not rolling
-        self.df['Hurst'] = self.df['Close'].expanding(window).apply(get_hurst, raw=True)
-    
-    def _add_fractal_dimension(self, window: int = 14):
-        # Simplified rolling fractal dimension (Katz)
-        def katz_fd(ts):
-            n = len(ts) - 1
-            L = np.sum(np.sqrt(1 + np.diff(ts)**2))
-            d = np.max(np.abs(ts - ts[0]))
-            return np.log(n) / (np.log(n) + np.log(d/L)) if d > 0 and L > 0 else np.nan
-        self.df['Fractal_Dim'] = self.df['Close'].rolling(window).apply(katz_fd, raw=True)
     
     def _add_efficiency_ratio(self, period: int = 10):
         change = self.df['Close'].diff(period).abs()

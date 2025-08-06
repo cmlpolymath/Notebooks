@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from functools import lru_cache
 import logging
 import json
+import sys
+import structlog
+from rich.logging import RichHandler
 
 # ==============================================================================
 # ENUMS FOR TYPE SAFETY AND PERFORMANCE
@@ -501,28 +504,72 @@ class Settings(OptimizedBaseModel):
     
     def configure_logging(self) -> None:
         """
-        Configures application-wide logging using a robust, default-quiet approach.
+        Configures application-wide logging using structlog.
+        - In DEVELOPMENT (default), renders beautiful, colorful logs with rich.
+        - In PRODUCTION (when LOG_FORMAT=json), renders machine-readable JSON.
         """
-        # Get the desired log levels from the settings
+        # ... (log level setup remains the same) ...
         app_level = getattr(logging, self.app_log_level.upper(), logging.INFO)
-        third_party_level = getattr(logging, self.third_party_log_level.upper(), logging.WARNING)
+        third_party_level = getattr(logging, self.third_party_level.upper(), logging.WARNING)
 
-        # 1. Configure the ROOT logger.
-        # This sets the default, quiet level for ALL libraries (like peewee, yfinance, etc.).
-        logging.basicConfig(
-            level=third_party_level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            force=True # Override any existing configurations
+        # This is the core processing pipeline, used by both renderers.
+        shared_processors = [
+            structlog.contextvars.merge_contextvars,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+        ]
+
+        # --- THE ENVIRONMENT-AWARE SWITCH ---
+        # Check an environment variable to decide which renderer to use.
+        if os.environ.get("LOG_FORMAT", "console").lower() == "json":
+            # PRODUCTION: Use the JSONRenderer
+            final_processor = structlog.processors.JSONRenderer()
+            log_handler = logging.StreamHandler(sys.stdout)
+        else:
+            # DEVELOPMENT: Use the RichHandler for beautiful logs
+            final_processor = structlog.dev.ConsoleRenderer(colors=True)
+            log_handler = RichHandler(rich_tracebacks=True, tracebacks_suppress=[])
+
+        # The final processing pipeline
+        processors = shared_processors + [
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ]
+
+        structlog.configure(
+            processors=processors,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            cache_logger_on_first_use=True,
         )
 
-        # 2. Configure our application's logger.
-        # This specifically "un-silences" our own code to the desired level.
-        # All of our scripts should use `logging.getLogger("flint")`.
+        formatter = structlog.stdlib.ProcessorFormatter(
+            foreign_pre_chain=shared_processors,
+            processor=final_processor,
+        )
+
+        log_handler.setFormatter(formatter)
+        
+        # Configure the root logger
+        root_logger = logging.getLogger()
+        root_logger.handlers = [log_handler]
+        root_logger.setLevel(third_party_level)
+
+        # Configure your application's logger
         app_logger = logging.getLogger("flint")
         app_logger.setLevel(app_level)
-        
-        print(f"Logging configured. App level: {self.app_log_level}, Third-party level: {self.third_party_log_level}")
-    
+        app_logger.propagate = False # Prevent duplicate logs
+
+        log = structlog.get_logger("flint.config")
+        log.info(
+            "logging_configured", 
+            renderer=type(final_processor).__name__,
+            app_level=self.app_log_level
+        )
+
     def apply_overrides(self, overrides: Dict[str, Any]) -> None:
         """Apply configuration overrides and re-configure logging."""
         for key, value in overrides.items():
