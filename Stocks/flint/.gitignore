@@ -4,3 +4,8 @@ results/*
 *.csv
 *.txt
 **/*.env
+*.html
+flint/*.html
+typescript/
+*.html
+typescript/
