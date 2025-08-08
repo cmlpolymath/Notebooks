@@ -105,17 +105,72 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
     scaler = RobustScaler(quantile_range=cfg.scaler_quantile_range)
     X_train_scaled = scaler.fit_transform(X_train)
     
-    # 4. ADASYN for class imbalance
-    print("Applying ADASYN for minority class synthesis...")
-    ada = ADASYN(
-        sampling_strategy=cfg.adasyn_sampling_strategy,
-        n_neighbors=cfg.adasyn_neighbors,
-        random_state=42
-    )
-    X_resampled, y_resampled = ada.fit_resample(X_train_scaled, y_train)
-    resampled_dist = Counter(y_resampled)
-    print(f"Resampled class distribution: {resampled_dist}")
-    print(f"Dataset size after ADASYN: {X_resampled.shape[0]} samples, {X_resampled.shape[1]} features")
+    # 4. ROBUST ADAPTIVE ADASYN for class imbalance (FIX #1)
+    print("Applying robust adaptive ADASYN for minority class synthesis...")
+    
+    # Check minority class size to determine if ADASYN is viable
+    class_counts = Counter(y_train)
+    minority_class_count = min(class_counts.values())
+    majority_class_count = max(class_counts.values())
+    
+    # Calculate imbalance ratio to determine if resampling is needed
+    imbalance_ratio = majority_class_count / minority_class_count
+    print(f"Class imbalance ratio: {imbalance_ratio:.2f}")
+    
+    # Skip ADASYN if classes are already balanced (ratio < 1.5)
+    if imbalance_ratio < 1.5:
+        print(f"Classes are already balanced (ratio: {imbalance_ratio:.2f}). Skipping ADASYN.")
+        X_resampled, y_resampled = X_train_scaled, y_train
+        resampled_dist = initial_dist
+        sampling_applied = "None_Balanced"
+    # Apply ADASYN with error handling
+    elif minority_class_count > cfg.adasyn_neighbors:
+        try:
+            ada = ADASYN(
+                sampling_strategy=cfg.adasyn_sampling_strategy,
+                n_neighbors=cfg.adasyn_neighbors,
+                random_state=42
+            )
+            X_resampled, y_resampled = ada.fit_resample(X_train_scaled, y_train)
+            resampled_dist = Counter(y_resampled)
+            print(f"Standard ADASYN applied successfully")
+            sampling_applied = "ADASYN_Standard"
+        except ValueError as e:
+            print(f"Standard ADASYN failed: {e}")
+            print("Falling back to no resampling...")
+            X_resampled, y_resampled = X_train_scaled, y_train
+            resampled_dist = initial_dist
+            sampling_applied = "None_ADASYN_Failed"
+    elif minority_class_count > 1:
+        # Adaptive n_neighbors: use minority_class_count - 1
+        adaptive_neighbors = minority_class_count - 1
+        print(f"Minority class size ({minority_class_count}) requires adaptive n_neighbors: {adaptive_neighbors}")
+        
+        try:
+            ada = ADASYN(
+                sampling_strategy=cfg.adasyn_sampling_strategy,
+                n_neighbors=adaptive_neighbors,
+                random_state=42
+            )
+            X_resampled, y_resampled = ada.fit_resample(X_train_scaled, y_train)
+            resampled_dist = Counter(y_resampled)
+            print(f"Adaptive ADASYN applied successfully")
+            sampling_applied = "ADASYN_Adaptive"
+        except ValueError as e:
+            print(f"Adaptive ADASYN failed: {e}")
+            print("Falling back to no resampling...")
+            X_resampled, y_resampled = X_train_scaled, y_train
+            resampled_dist = initial_dist
+            sampling_applied = "None_ADASYN_Failed"
+    else:
+        # Skip ADASYN if minority class is too small (≤1 sample)
+        print(f"Warning: Minority class too small ({minority_class_count} samples). Skipping ADASYN resampling.")
+        X_resampled, y_resampled = X_train_scaled, y_train
+        resampled_dist = initial_dist
+        sampling_applied = "None_TooSmall"
+    
+    print(f"Final class distribution: {resampled_dist}")
+    print(f"Dataset size after resampling: {X_resampled.shape[0]} samples, {X_resampled.shape[1]} features")
     
     # Convert back to DataFrame with original feature names to avoid warnings
     X_resampled_df = pd.DataFrame(X_resampled, columns=X_train.columns)
@@ -144,8 +199,7 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
     print(f"Expected total model fits: {total_fits}")
     print(f"Estimated training time: {total_fits * 2:.2f}-{total_fits * 8:.2f} seconds")    
     
-    # 7. Hyperparameter tuning with time-aware validation
-    # print(f"Starting hyperparameter search with {cfg.hyperparam_tuning_iterations} iterations...")
+    # 7. ULTRA-ROBUST HYPERPARAMETER TUNING with time-aware validation (FIX #2)
     rf_base = RandomForestClassifier(
         n_estimators=cfg.base_n_estimators,
         max_depth=cfg.base_max_depth,
@@ -156,18 +210,49 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
         oob_score=True
     )
     
-    print("Starting hyperparameter optimization...")
+    print("Starting ultra-robust hyperparameter optimization...")
     print(f"Search space: {cfg.hyperparam_tuning_iterations} candidates × {cfg.tscv_splits} folds = {total_fits} total fits")
+
+    # Check if we have both classes in the dataset - if not, use simpler scoring
+    unique_classes = len(set(y_resampled))
+    
+    if unique_classes < 2:
+        print("Warning: Only one class present in dataset. Using accuracy scoring only.")
+        scoring_strategy = 'accuracy'
+        refit_strategy = 'accuracy'
+    else:
+        # Custom scorer that handles single-class folds gracefully
+        from sklearn.metrics import make_scorer, accuracy_score, roc_auc_score
+        import warnings
+        
+        def safe_roc_auc_score(y_true, y_pred_proba, **kwargs):
+            """ROC AUC that returns 0.5 (random chance) for single-class cases"""
+            try:
+                if len(set(y_true)) < 2:
+                    return 0.5  # Random chance baseline for single-class folds
+                else:
+                    return roc_auc_score(y_true, y_pred_proba)
+            except Exception:
+                return 0.5  # Fallback to random chance on any error
+        
+        # Create safe scorers - let's use a simpler approach
+        scoring_strategy = {
+            'roc_auc': make_scorer(safe_roc_auc_score, needs_proba=True),
+            'accuracy': 'accuracy'  # Use built-in accuracy scorer
+        }
+        refit_strategy = 'roc_auc'
 
     rf_tuner = RandomizedSearchCV(
         estimator=rf_base,
         param_distributions=cfg.param_distributions,
         n_iter=cfg.hyperparam_tuning_iterations,
         cv=tscv,
-        scoring='roc_auc',
+        scoring=scoring_strategy,
+        refit=refit_strategy,
         n_jobs=-1,
         verbose=0,  # Silence sklearn completely
-        random_state=42
+        random_state=42,
+        error_score=0.5  # Return 0.5 (random chance) instead of nan if scorer fails
     )
 
     # Simple progress indicator
@@ -248,7 +333,7 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
         "class_distribution_resampled": dict(resampled_dist),
         "time_series_cv_splits": cfg.tscv_splits,
         "time_series_cv_gap": cfg.tscv_gap,
-        "sampling_strategy": "ADASYN",
+        "sampling_strategy": sampling_applied,
         "config_params": cfg.model_dump()
     }
     
