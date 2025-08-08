@@ -10,11 +10,14 @@ from typing import List, Dict, Optional, Tuple, Any
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
 from functools import lru_cache
+from rich.logging import RichHandler
+from rich.table import Table
+from rich.text import Text  
+import os
 import logging
 import json
 import sys
 import structlog
-from rich.logging import RichHandler
 
 # ==============================================================================
 # ENUMS FOR TYPE SAFETY AND PERFORMANCE
@@ -117,7 +120,6 @@ class DataConfig(OptimizedBaseModel):
 # MODEL CONFIGURATIONS
 # ==============================================================================
 
-# From: config.py
 # From: config.py
 
 class RandomForestParams(OptimizedBaseModel):
@@ -466,6 +468,9 @@ class SystemConfig(OptimizedBaseModel):
     max_cpu_usage: float = Field(default=0.8, gt=0, le=1, description="Max CPU utilization")
     gc_threshold: int = Field(default=1000, ge=100, description="Garbage collection threshold")
 
+    # Rich controls
+    enable_progress_bars: bool = Field(default=True, description="Enable rich progress bars for long tasks.")
+
 # ==============================================================================
 # MAIN CONFIGURATION CLASS
 # ==============================================================================
@@ -504,69 +509,76 @@ class Settings(OptimizedBaseModel):
     
     def configure_logging(self) -> None:
         """
-        Configures application-wide logging using structlog.
-        - In DEVELOPMENT (default), renders beautiful, colorful logs with rich.
-        - In PRODUCTION (when LOG_FORMAT=json), renders machine-readable JSON.
+        Configures application-wide logging using structlog correctly piped into rich.
+        This version resolves the garbled output by ensuring only RichHandler
+        is responsible for console rendering in development.
         """
-        # ... (log level setup remains the same) ...
         app_level = getattr(logging, self.app_log_level.upper(), logging.INFO)
-        third_party_level = getattr(logging, self.third_party_level.upper(), logging.WARNING)
+        third_party_level = getattr(logging, self.third_party_log_level.upper(), logging.WARNING)
 
-        # This is the core processing pipeline, used by both renderers.
+        # This is the shared processing pipeline for ALL logs.
         shared_processors = [
             structlog.contextvars.merge_contextvars,
-            structlog.stdlib.add_logger_name,
             structlog.stdlib.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
-            structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
-        ]
-
-        # --- THE ENVIRONMENT-AWARE SWITCH ---
-        # Check an environment variable to decide which renderer to use.
-        if os.environ.get("LOG_FORMAT", "console").lower() == "json":
-            # PRODUCTION: Use the JSONRenderer
-            final_processor = structlog.processors.JSONRenderer()
-            log_handler = logging.StreamHandler(sys.stdout)
-        else:
-            # DEVELOPMENT: Use the RichHandler for beautiful logs
-            final_processor = structlog.dev.ConsoleRenderer(colors=True)
-            log_handler = RichHandler(rich_tracebacks=True, tracebacks_suppress=[])
-
-        # The final processing pipeline
-        processors = shared_processors + [
+            # This processor must come last to format the log record for the handler.
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ]
 
+        # --- THE ENVIRONMENT-AWARE SWITCH ---
+        if os.environ.get("LOG_FORMAT", "console").lower() == "json":
+            # --- PRODUCTION: JSON LOGS ---
+            # The final processor is a machine-readable JSON renderer.
+            log_renderer = structlog.processors.JSONRenderer()
+            handler = logging.StreamHandler(sys.stdout)
+        else:
+            # --- DEVELOPMENT: RICH CONSOLE LOGS ---
+            # RichHandler will handle all rendering, including colors and formatting.
+            handler = RichHandler(rich_tracebacks=True, tracebacks_suppress=[])
+            
+            # --- THE FIX IS HERE ---
+            # We use a renderer that ONLY formats the key-value pairs into a string
+            # WITHOUT adding any color codes. RichHandler will add the color.
+            log_renderer = structlog.dev.ConsoleRenderer(colors=False, sort_keys=False)
+
+        # Configure structlog to use the shared processors.
         structlog.configure(
-            processors=processors,
+            processors=shared_processors,
             logger_factory=structlog.stdlib.LoggerFactory(),
             wrapper_class=structlog.stdlib.BoundLogger,
             cache_logger_on_first_use=True,
         )
 
+        # This formatter connects the structlog pipeline to the standard logging handler.
         formatter = structlog.stdlib.ProcessorFormatter(
-            foreign_pre_chain=shared_processors,
-            processor=final_processor,
+            # The `processor` is the final step that turns the log dictionary into a string.
+            processor=log_renderer,
+            # `foreign_pre_chain` is for logs from other libraries (e.g., yfinance).
+            foreign_pre_chain=[
+                structlog.stdlib.add_log_level,
+                structlog.stdlib.add_logger_name,
+            ],
         )
 
-        log_handler.setFormatter(formatter)
+        handler.setFormatter(formatter)
         
-        # Configure the root logger
+        # Configure the root logger to use ONLY our configured handler.
         root_logger = logging.getLogger()
-        root_logger.handlers = [log_handler]
+        root_logger.handlers = [handler]
         root_logger.setLevel(third_party_level)
 
-        # Configure your application's logger
+        # Set the level for our application's specific logger.
         app_logger = logging.getLogger("flint")
         app_logger.setLevel(app_level)
-        app_logger.propagate = False # Prevent duplicate logs
+        app_logger.propagate = False # Prevent duplicate messages.
 
         log = structlog.get_logger("flint.config")
         log.info(
             "logging_configured", 
-            renderer=type(final_processor).__name__,
+            renderer=log_renderer.__class__.__name__,
+            handler=handler.__class__.__name__,
             app_level=self.app_log_level
         )
 
@@ -621,6 +633,25 @@ class Settings(OptimizedBaseModel):
                 'third_party_log_level': 'INFO', # Slightly more verbose for third-party
             })
         return overrides
+    
+class RichLogRenderer:
+    """
+    A structlog processor that intelligently prepares log records for rendering
+    by the rich library.
+    
+    It leaves rich-renderable objects (like Tables) untouched so that
+    RichHandler can render them, and converts all other values to strings.
+    """
+    def __call__(self, logger, method_name, event_dict):
+        # The __call__ method makes instances of this class behave like functions.
+        for key, value in event_dict.items():
+            # If the value is a rich object, let RichHandler deal with it.
+            if isinstance(value, (Table, Text)):
+                continue
+            # Otherwise, ensure it's a clean string for printing.
+            event_dict[key] = str(value)
+        return event_dict
+
 
 
 # ==============================================================================

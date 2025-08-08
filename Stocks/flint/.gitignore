@@ -9,3 +9,4 @@ flint/*.html
 typescript/
 *.html
 typescript/
+*.json

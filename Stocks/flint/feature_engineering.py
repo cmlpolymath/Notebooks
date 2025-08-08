@@ -61,8 +61,8 @@ class FeatureCalculator:
         self._add_realized_vol()
         self._add_efficiency_ratio()
         self._add_vwap_zscore()
-        self.df = self.aggressor.add_hurst(self.df, window=100)
-        self.df = self.aggressor.add_fractal_dimension(self.df, window=14)
+        self.df = self.aggressors.add_hurst(self.df, window=100)
+        self.df = self.aggressors.add_fractal_dimension(self.df, window=14)
         
         # --- Stage 2: Merge All External Data Sources ---
         print("Merging external data sources...")

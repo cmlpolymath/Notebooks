@@ -3,13 +3,14 @@
 import random
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 import torch
 import torch.nn as nn
 from torch.quasirandom import SobolEngine
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.mixture import GaussianMixture
 from scipy.stats import linregress
+from rich.progress import Progress
+from config import settings
 
 # --- Helper Functions and Networks ---
 
@@ -244,7 +245,7 @@ class MonteCarloTrendFilter:
         steps = int(horizon / dt)
         S0 = float(self.close_series.iloc[-1])
 
-        with tqdm(total=n_sims, desc="[MC Simulation]") as pbar:
+        def run_simulation_loop(progress_bar=None, task_id=None):
             for count, vol_val in zip(comp_counts, sigmas):
                 if count <= 0:
                     continue
@@ -279,8 +280,19 @@ class MonteCarloTrendFilter:
                 slope_vals = ((T * sum_ty - t.sum() * sum_y) / denom).cpu().numpy()
                 slopes.append(slope_vals)
                 
-                pbar.update(count)
+                # If a progress bar is active, update it.
+                if progress_bar and task_id is not None:
+                    progress_bar.update(task_id, advance=count)
 
+        # Conditionally run the simulation with or without a progress bar
+        if settings.system.enable_progress_bars:
+            with Progress(refresh_per_second=10) as progress:
+                task = progress.add_task("[green][Monte-Carlo Simulation][/green]", total=n_sims)
+                run_simulation_loop(progress_bar=progress, task_id=task)
+        else:
+            # Run without the progress bar context manager
+            run_simulation_loop()
+            
         slopes = np.concatenate(slopes) if slopes else np.array([])
 
         if slopes.size == 0:
