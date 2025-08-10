@@ -2,6 +2,10 @@
 import copy
 import math
 import os
+import structlog
+import time
+import threading
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 from collections import Counter
 
 import lightgbm as lgb
@@ -22,6 +26,7 @@ from xgboost import XGBClassifier
 
 from config import settings
 
+logger = structlog.get_logger(__name__)
 
 class PositionalEncoding(nn.Module):
     """Injects positional information into the input sequence."""
@@ -84,29 +89,37 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
     and model stacking. Expects pre-engineered features including market regimes and interaction features.
     """
     
-    print("\n--- Training Enhanced Random Forest with Time-Aware Validation & Stacking ---")
-    cfg = settings.models.random_forest
     
+    cfg = settings.models.random_forest
+    logger.info("\n--- Training Enhanced Random Forest with Time-Aware Validation & Stacking ---")
+    
+    # Establish a single source of truth for n_jobs based on the correct config flag.
+    if settings.system.enable_profiling:
+        logger.warning("profiling_mode_active", reason="All model training will be single-threaded for stability.")
+        n_jobs_safe = 1
+    else:
+        n_jobs_safe = -1
+
     # 1. Validate expected pre-engineered features are present
     expected_features = ['is_bull_regime', 'is_bear_regime', 'Price_x_Volume', 'RSI_div_ATR']
     available_features = [feat for feat in expected_features if feat in X_train.columns]
     missing_features = [feat for feat in expected_features if feat not in X_train.columns]
     
-    print(f"Pre-engineered features found: {available_features}")
+    logger.info(f"Pre-engineered features found: {available_features}")
     if missing_features:
-        print(f"Warning: Missing expected features: {missing_features}")
+        logger.warn(f"Missing expected features: {missing_features}")
     
     # 2. Check class imbalance
     initial_dist = Counter(y_train)
-    print(f"Initial class distribution: {initial_dist}")
+    logger.info(f"Initial class distribution: {initial_dist}")
     
     # 3. Time-series aware scaling
-    print("Applying RobustScaler...")
+    logger.info("Applying RobustScaler...")
     scaler = RobustScaler(quantile_range=cfg.scaler_quantile_range)
     X_train_scaled = scaler.fit_transform(X_train)
     
     # 4. ROBUST ADAPTIVE ADASYN for class imbalance (FIX #1)
-    print("Applying robust adaptive ADASYN for minority class synthesis...")
+    logger.info("Applying robust adaptive ADASYN for minority class synthesis...")
     
     # Check minority class size to determine if ADASYN is viable
     class_counts = Counter(y_train)
@@ -115,11 +128,11 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
     
     # Calculate imbalance ratio to determine if resampling is needed
     imbalance_ratio = majority_class_count / minority_class_count
-    print(f"Class imbalance ratio: {imbalance_ratio:.2f}")
+    logger.info(f"Class imbalance ratio: {imbalance_ratio:.2f}")
     
     # Skip ADASYN if classes are already balanced (ratio < 1.5)
     if imbalance_ratio < 1.5:
-        print(f"Classes are already balanced (ratio: {imbalance_ratio:.2f}). Skipping ADASYN.")
+        logger.info(f"Classes are already balanced (ratio: {imbalance_ratio:.2f}). Skipping ADASYN.")
         X_resampled, y_resampled = X_train_scaled, y_train
         resampled_dist = initial_dist
         sampling_applied = "None_Balanced"
@@ -133,18 +146,18 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
             )
             X_resampled, y_resampled = ada.fit_resample(X_train_scaled, y_train)
             resampled_dist = Counter(y_resampled)
-            print(f"Standard ADASYN applied successfully")
+            logger.info("Standard ADASYN applied successfully")
             sampling_applied = "ADASYN_Standard"
         except ValueError as e:
-            print(f"Standard ADASYN failed: {e}")
-            print("Falling back to no resampling...")
+            logger.info(f"Standard ADASYN failed: {e}")
+            logger.info("Falling back to no resampling...")
             X_resampled, y_resampled = X_train_scaled, y_train
             resampled_dist = initial_dist
             sampling_applied = "None_ADASYN_Failed"
     elif minority_class_count > 1:
         # Adaptive n_neighbors: use minority_class_count - 1
         adaptive_neighbors = minority_class_count - 1
-        print(f"Minority class size ({minority_class_count}) requires adaptive n_neighbors: {adaptive_neighbors}")
+        logger.info(f"Minority class size ({minority_class_count}) requires adaptive n_neighbors: {adaptive_neighbors}")
         
         try:
             ada = ADASYN(
@@ -154,50 +167,50 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
             )
             X_resampled, y_resampled = ada.fit_resample(X_train_scaled, y_train)
             resampled_dist = Counter(y_resampled)
-            print(f"Adaptive ADASYN applied successfully")
+            logger.info("Adaptive ADASYN applied successfully")
             sampling_applied = "ADASYN_Adaptive"
         except ValueError as e:
-            print(f"Adaptive ADASYN failed: {e}")
-            print("Falling back to no resampling...")
+            logger.info(f"Adaptive ADASYN failed: {e}")
+            logger.info("Falling back to no resampling...")
             X_resampled, y_resampled = X_train_scaled, y_train
             resampled_dist = initial_dist
             sampling_applied = "None_ADASYN_Failed"
     else:
         # Skip ADASYN if minority class is too small (≤1 sample)
-        print(f"Warning: Minority class too small ({minority_class_count} samples). Skipping ADASYN resampling.")
+        logger.warn(f"Minority class too small ({minority_class_count} samples). Skipping ADASYN resampling.")
         X_resampled, y_resampled = X_train_scaled, y_train
         resampled_dist = initial_dist
         sampling_applied = "None_TooSmall"
     
-    print(f"Final class distribution: {resampled_dist}")
-    print(f"Dataset size after resampling: {X_resampled.shape[0]} samples, {X_resampled.shape[1]} features")
+    logger.info(f"Final class distribution: {resampled_dist}")
+    logger.info(f"Dataset size after resampling: {X_resampled.shape[0]} samples, {X_resampled.shape[1]} features")
     
     # Convert back to DataFrame with original feature names to avoid warnings
     X_resampled_df = pd.DataFrame(X_resampled, columns=X_train.columns)
     
     # 5. Model-based feature selection with proper DataFrame handling
-    print("Selecting most predictive features...")
+    logger.info("Selecting most predictive features...")
     selector = SelectFromModel(
-        estimator=RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+        estimator=RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=n_jobs_safe),
         max_features=cfg.feature_selection_max_features,
         threshold=cfg.feature_selection_threshold
     )
-    
-    # Fit selector and get selected feature names
     selector.fit(X_resampled_df, y_resampled)
     selected_feature_names = X_resampled_df.columns[selector.get_support()].tolist()
     X_selected_df = X_resampled_df[selected_feature_names]
+    logger.info("feature_selection_complete", count=len(selected_feature_names))
+
     
-    print(f"Selected {X_selected_df.shape[1]} features: {selected_feature_names}")
+    logger.info(f"Selected {X_selected_df.shape[1]} features: {selected_feature_names}")
     
     # 6. Time-aware cross-validation setup
-    print(f"Setting up TimeSeriesSplit with {cfg.tscv_splits} splits and {cfg.tscv_gap} day gap...")
+    logger.info(f"Setting up TimeSeriesSplit with {cfg.tscv_splits} splits and {cfg.tscv_gap} day gap...")
     tscv = TimeSeriesSplit(n_splits=cfg.tscv_splits, gap=cfg.tscv_gap)
     
     # Print expected computation load
     total_fits = cfg.hyperparam_tuning_iterations * cfg.tscv_splits
-    print(f"Expected total model fits: {total_fits}")
-    print(f"Estimated training time: {total_fits * 2:.2f}-{total_fits * 8:.2f} seconds")    
+    logger.info(f"Expected total model fits: {total_fits}")
+    logger.info(f"Estimated training time: {total_fits * 2:.2f}-{total_fits * 8:.2f} seconds")    
     
     # 7. ULTRA-ROBUST HYPERPARAMETER TUNING with time-aware validation (FIX #2)
     rf_base = RandomForestClassifier(
@@ -205,25 +218,24 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
         max_depth=cfg.base_max_depth,
         min_samples_leaf=cfg.base_min_samples_leaf,
         max_features=cfg.base_max_features,
-        n_jobs=-1,
+        n_jobs=n_jobs_safe,
         random_state=42,
         oob_score=True
     )
     
-    print("Starting ultra-robust hyperparameter optimization...")
-    print(f"Search space: {cfg.hyperparam_tuning_iterations} candidates × {cfg.tscv_splits} folds = {total_fits} total fits")
+    logger.info("Starting ultra-robust hyperparameter optimization...")
+    logger.info(f"Search space: {cfg.hyperparam_tuning_iterations} candidates × {cfg.tscv_splits} folds = {total_fits} total fits")
 
     # Check if we have both classes in the dataset - if not, use simpler scoring
     unique_classes = len(set(y_resampled))
     
     if unique_classes < 2:
-        print("Warning: Only one class present in dataset. Using accuracy scoring only.")
+        logger.warn("Only one class present in dataset. Using accuracy scoring only.")
         scoring_strategy = 'accuracy'
         refit_strategy = 'accuracy'
     else:
         # Custom scorer that handles single-class folds gracefully
         from sklearn.metrics import make_scorer, accuracy_score, roc_auc_score
-        import warnings
         
         def safe_roc_auc_score(y_true, y_pred_proba, **kwargs):
             """ROC AUC that returns 0.5 (random chance) for single-class cases"""
@@ -249,54 +261,105 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
         cv=tscv,
         scoring=scoring_strategy,
         refit=refit_strategy,
-        n_jobs=-1,
-        verbose=0,  # Silence sklearn completely
+        n_jobs=n_jobs_safe,
+        verbose=0,
         random_state=42,
-        error_score=0.5  # Return 0.5 (random chance) instead of nan if scorer fails
+        error_score=0.5
     )
 
-    # Simple progress indicator
+
+    # Config-driven, profiler-safe progress feedback
     import time
-    start_time = time.time()
-    print("⏳ Training in progress...")
-
-    rf_tuner.fit(X_selected_df, y_resampled)    
-    best_rf = rf_tuner.best_estimator_
     
+    start_time = time.time()
+    total_fits = cfg.hyperparam_tuning_iterations * cfg.tscv_splits
+    
+    # Check if profiling is enabled in your settings
+    if hasattr(settings.system, 'enable_profiling') and settings.system.enable_profiling:
+        # PROFILING MODE - Zero threading, completely safe
+        print(f"🔍 Profiling mode active - using thread-safe feedback")
+        print(f"⏳ Starting hyperparameter optimization: {total_fits} total fits")
+        
+        # Simple, blocking execution - no threads at all
+        rf_tuner.fit(X_selected_df, y_resampled)
+        
+    else:
+        # NORMAL MODE - Enhanced user experience with threading
+        import sys
+        import threading
+        from itertools import cycle
+        
+        training_complete = threading.Event()
+        
+        print(f"🚀 Starting hyperparameter optimization: {total_fits} total fits")
+        
+        def console_progress():
+            """Thread-safe progress spinner for normal execution"""
+            spinner = cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'])
+            
+            while not training_complete.is_set():
+                elapsed = time.time() - start_time
+                spinner_char = next(spinner)
+                
+                # Simple elapsed time display
+                sys.stdout.write(f"\r{spinner_char} Training in progress... {elapsed:.1f}s elapsed")
+                sys.stdout.flush()
+                time.sleep(0.3)  # Update ~3 times per second
+        
+        # Start progress thread only in normal mode
+        progress_thread = threading.Thread(target=console_progress, daemon=True)
+        progress_thread.start()
+        
+        try:
+            # Run the training
+            rf_tuner.fit(X_selected_df, y_resampled)
+        finally:
+            # Always clean up the spinner, even if training fails
+            training_complete.set()
+            time.sleep(0.5)  # Let spinner finish gracefully
+            
+            # Clear the progress line
+            sys.stdout.write("\r" + " " * 60 + "\r")
+            sys.stdout.flush()
+    
+    # Get results (same for both modes)
+    best_rf = rf_tuner.best_estimator_
     elapsed_time = time.time() - start_time
-    print(f"Hyperparameter search completed in {elapsed_time:.2f} seconds")
-    print(f"Best Parameters: {rf_tuner.best_params_}")
-    print(f"Best Random Forest CV Score: {rf_tuner.best_score_:.4f}")
-    print(f"Random Forest OOB Score: {best_rf.oob_score_:.4f}")
 
+    logger.info(f"Best Parameters: {rf_tuner.best_params_}")
+    logger.info(f"Best Random Forest CV Score: {rf_tuner.best_score_:.4f}")
+    logger.info(f"Random Forest OOB Score: {best_rf.oob_score_:.4f}")
+
+    logger.info(f"Hyperparameter search completed in {elapsed_time:.2f} seconds")
     # 8. Model Stacking (simplified to avoid redundant validation)
     final_model = best_rf  # Default to RF if stacking disabled
     stacking_cv_score = None
     
     if cfg.enable_stacking:
-        print("Creating StackingClassifier with LightGBM and Logistic Regression...")
+        logger.info("stacking_start")
         
-        # LightGBM base estimator with proper configuration
+        # Use the safe n_jobs setting here
         lgb_base = lgb.LGBMClassifier(
             max_depth=cfg.lgb_max_depth,
             learning_rate=cfg.lgb_learning_rate,
             n_estimators=cfg.lgb_n_estimators,
             num_leaves=cfg.lgb_num_leaves,
             random_state=42,
-            n_jobs=-1,
-            verbose=-1,  # Suppress LightGBM output
-            force_col_wise=True  # Better for financial datasets
+            n_jobs=n_jobs_safe,
+            verbose=-1,
+            force_col_wise=True
         )
-        
+
         # Use regular KFold for stacking instead of TimeSeriesSplit
         # TimeSeriesSplit doesn't work with StackingClassifier's cross_val_predict
         from sklearn.model_selection import KFold
-        stacking_cv = KFold(n_splits=3, shuffle=False)  # Remove random_state when shuffle=False
+        rf_for_stacking = RandomForestClassifier(**best_rf.get_params())
+
+        stacking_cv = KFold(n_splits=3, shuffle=False)
         
-        # Stacking classifier
         stacking_clf = StackingClassifier(
             estimators=[
-                ('rf', best_rf),
+                ('rf', rf_for_stacking),
                 ('lgb', lgb_base)
             ],
             final_estimator=LogisticRegression(
@@ -304,18 +367,16 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
                 random_state=42,
                 max_iter=1000
             ),
-            cv=stacking_cv,  # Use KFold instead of TimeSeriesSplit
-            n_jobs=-1
+            cv=stacking_cv,
+            n_jobs=n_jobs_safe # Use the safe setting for the stacker itself
         )
         
-        # Train the stacking classifier on DataFrame to preserve feature names
-        print("Training StackingClassifier...")
+        logger.info("Training StackingClassifier...")
         stacking_clf.fit(X_selected_df, y_resampled)
         final_model = stacking_clf
         
-        # Simple validation score (no redundant cross-validation)
-        stacking_cv_score = rf_tuner.best_score_  # Use RF CV score as proxy
-        print("Stacking Classifier created successfully")
+        stacking_cv_score = rf_tuner.best_score_
+        logger.info("stacking_complete")
     
     # 9. Prepare enhanced metadata for logging
     run_config = {
@@ -343,7 +404,7 @@ def train_xgboost(X_train, y_train, params: dict | None = None):
     """
     Trains an XGBoost model using either provided parameters or defaults from config.
     """
-    print("Training XGBoost model...")
+    logger.info("Training XGBoost model...")
     # If no specific params are passed, use the defaults from the config file
     if params is None:
         params = settings.models.xgboost.model_dump(exclude_unset=True)
@@ -354,7 +415,7 @@ def train_xgboost(X_train, y_train, params: dict | None = None):
     return xgb_model
 
 def get_shap_importance(xgb_model, X_test):
-    print("Calculating SHAP values...")
+    logger.info("Calculating SHAP values...")
     explainer = shap.TreeExplainer(xgb_model)
     shap_values = explainer.shap_values(X_test)
     if isinstance(shap_values, list):
@@ -398,8 +459,9 @@ def prepare_sequences(X, y, window_size: int):
     return X_seq, y_seq
 
 def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | None = None):
-    print("Training Transformer model...")
-    
+    log = logger.bind(model_name="Transformer")
+    log.info("training_start")
+        
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
@@ -409,7 +471,7 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
     X_seq_test, y_seq_test = prepare_sequences(X_test_scaled, y_test, seq_window)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    log.info("device_setup", device=str(device))
 
     model_params = settings.models.transformer_arch.model_dump(exclude_unset=True)
     
@@ -426,8 +488,8 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
     # This is a safeguard against OOM even with accumulation.
     batch_size = min(train_cfg.get('batch_size', 256), 128) # Cap batch size at a safe limit
     if accumulation_steps > 1:
-        print(f"Using gradient accumulation with {accumulation_steps} steps.")
-        print(f"Physical batch size: {batch_size}, Effective batch size: {batch_size * accumulation_steps}")
+        logger.info(f"Using gradient accumulation with {accumulation_steps} steps.")
+        logger.info(f"Physical batch size: {batch_size}, Effective batch size: {batch_size * accumulation_steps}")
 
     model = StockTransformer(
         input_features=X_seq_train.shape[2],
@@ -438,11 +500,15 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
         dropout=model_params.get('dropout', 0.1) 
     ).to(device)
         
-    try:
-        model = torch.compile(model, backend="aot_eager")
-        print("Model compiled successfully with 'aot_eager' backend.")
-    except Exception as e:
-        print(f"Could not compile model, will run in eager mode. Error: {e}")
+    # Check the global settings object to see if we are in profiling mode.
+    if not settings.system.enable_profiling:
+        try:
+            model = torch.compile(model, backend="aot_eager")
+            log.info("torch_compile_enabled", backend="aot_eager")
+        except Exception as e:
+            log.warning("torch_compile_failed", error=str(e))
+    else:
+        log.warning("enable_profiling_active", reason="torch.compile has been disabled.")
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.get('lr', 1e-4), weight_decay=train_cfg.get('weight_decay', 1e-5))
@@ -451,9 +517,14 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
     train_dataset = TensorDataset(torch.tensor(X_seq_train, dtype=torch.float32), torch.tensor(y_seq_train, dtype=torch.long))
     val_dataset = TensorDataset(torch.tensor(X_seq_test, dtype=torch.float32), torch.tensor(y_seq_test, dtype=torch.long))
     
-    # Use the potentially smaller, safer batch size
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=min(4, os.cpu_count() or 1))    
-    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, pin_memory=True, num_workers=min(0, os.cpu_count() or 1))
+    if settings.system.enable_profiling:
+        num_workers = 0
+        log.warning("enable_profiling_active", reason="DataLoader multi-processing has been disabled.")
+    else:
+        num_workers = min(4, os.cpu_count() or 1)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=num_workers)    
+    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, pin_memory=True, num_workers=num_workers)
 
     scaler_amp = torch.amp.GradScaler(device.type, enabled=(device.type == 'cuda'))
     
@@ -484,7 +555,7 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
                 loss = loss / accumulation_steps
             
             if torch.isnan(loss):
-                print(f"Epoch {epoch}: Loss is NaN. Stopping training.")
+                logger.info(f"Epoch {epoch}: Loss is NaN. Stopping training.")
                 model.load_state_dict(best_model_wts)
                 return model, device, scaler, y_seq_test
 
@@ -521,7 +592,7 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
         
         avg_val_loss = total_val_loss / len(val_loader)
         
-        print(f"Epoch {epoch}/{epochs} -> Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
+        logger.info(f"Epoch {epoch}/{epochs} -> Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
         
         scheduler.step(avg_val_loss)
 
@@ -529,14 +600,14 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
             best_val_loss = avg_val_loss
             epochs_no_improve = 0
             best_model_wts = copy.deepcopy(model.state_dict())
-            print(f"   -> New best validation loss: {best_val_loss:.6f}")
+            logger.info(f"   -> New best validation loss: {best_val_loss:.6f}")
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                print(f"\nEarly stopping triggered after {patience} epochs with no improvement.")
+                logger.info(f"\nEarly stopping triggered after {patience} epochs with no improvement.")
                 break
 
-    print("Loading best model weights...")
+    logger.info("Loading best model weights...")
     model.load_state_dict(best_model_wts)
         
     return model, device, scaler, y_seq_test

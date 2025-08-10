@@ -21,6 +21,7 @@ from preprocess import prepare_and_cache_data
 
 # Instantiate the logger. It will automatically use the config from settings.
 logger = structlog.get_logger(__name__)
+console = Console()
 
 def validate_ticker(ticker: str) -> str:
     """Sanitize and validate a stock or crypto ticker format."""
@@ -46,7 +47,18 @@ def main():
         action='store_true',
         help="Force reprocessing of data, ignoring any existing cached .pt files."
     )
+
+    parser.add_argument(
+        '--profile',
+        action='store_true',
+        help="Run in profiling mode. This disables some optimizations like torch.compile and DataLoader workers to ensure accurate profiling."
+    )
+
     args = parser.parse_args()
+
+    if args.profile:
+        logger.warn((f"!!! RUNNING IN PROFILING MODE. PERFORMANCE WILL BE REDUCED!!!"))
+        settings.system.enable_profiling = True
     
     audit_logger.setup_audit_db()
 
@@ -227,7 +239,6 @@ def main():
             )
 
             # 2. Create and print a beautiful, human-readable table for the console.
-            console = Console()
 
             forecast_table = Table(
                 show_header=True,
