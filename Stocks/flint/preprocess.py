@@ -4,12 +4,16 @@ from datetime import date
 import torch
 import numpy as np
 import argparse
+import structlog
 
 # Import project modules
 from config import settings
 import data_handler
+from data_store import B2Data
 from feature_engineering import FeatureCalculator
 import models
+
+logger = structlog.get_logger(__name__)
 
 def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_reprocess: bool = False):
     """
@@ -23,115 +27,91 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
     3. Saves the processed data to a cache file for future runs.
     4. Returns a dictionary containing all processed data objects.
     """
+    data_store = B2Data()
+    safe_ticker = data_handler.sanitize_ticker_for_filename(ticker)
+    log = logger.bind(ticker=ticker)
 
- # --- Fetch and cache macro data FIRST, independently of the stock. ---
-    print("\n--- Checking FRED Macroeconomic Data Cache ---")
-    df_macro_fred = data_handler.get_macro_data(force_redownload=force_reprocess)
+    # --- FIX: Call the method on the INSTANCE (data_store) and pass the CORRECT variable (safe_ticker) ---
+    if not force_reprocess and data_store.is_cache_valid(safe_ticker):
+        log.info("cache_hit_valid", storage_format="structured_directory")
+        return data_store.load_data_package(safe_ticker)
     
-    print("\n--- Checking yfinance Macroeconomic Data Cache ---")
+    if force_reprocess:
+        log.warning("cache_ignored", reason="--force-reprocess flag used")
+    else:
+        log.info("cache_miss_or_stale", reason="No valid cache from today found")
+
+    # --- Full data pipeline continues here ---
+    log.info("data_pipeline_start", reason="Generating new data package")
+    
+    df_macro_fred = data_handler.get_macro_data(force_redownload=force_reprocess)
     macro_dfs_yf = {}
     for name, macro_ticker in settings.features.macro_tickers_yf.items():
         macro_dfs_yf[name] = data_handler.get_stock_data(
             ticker=macro_ticker, start_date=start_date, end_date=end_date, force_redownload=force_reprocess
         )
 
-    processed_dir = Path('data/processed')
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    safe_ticker = data_handler.sanitize_ticker_for_filename(ticker)
-    cache_file = processed_dir / f"{safe_ticker}_data.pt"
-
-    # Check if the processed cache file exists AND is from today.
-    if not force_reprocess and cache_file.exists():
-        last_mod_time = date.fromtimestamp(cache_file.stat().st_mtime)
-        if last_mod_time >= date.today():
-            print(f"Found recent processed data cache for {ticker}. Loading from '{cache_file}'.")
-            return torch.load(cache_file, weights_only=False)
-        else:
-            print(f"Processed data cache for {ticker} is outdated. Reprocessing...")
-
-    print(f"Processing and caching data for {ticker}...")
-
-    # Step 1: Load raw data
     df_raw = data_handler.get_stock_data(ticker=ticker, start_date=start_date, end_date=end_date)
     if df_raw is None or len(df_raw) < 350:
         raise ValueError(f"Insufficient raw data for {ticker} (need ~350 days).")
     
-    market_df = data_handler.get_stock_data(ticker=settings.data.market_index_ticker,
-                                            start_date=start_date,
-                                            end_date=end_date)
+    market_df = data_handler.get_stock_data(ticker=settings.data.market_index_ticker, start_date=start_date, end_date=end_date)
     if market_df is None:
         raise ValueError(f"Could not load market index data for {settings.data.market_index_ticker}.")
 
-    # --- MODIFIED: Load Sector Data only for non-crypto assets ---
     sector_df = None
-    # Simple heuristic to detect crypto tickers
     is_crypto = '-USD' in ticker.upper() or '-USDT' in ticker.upper()
-
     if not is_crypto:
         try:
             info = data_handler.get_ticker_info(ticker)
             sector = info.get('sector')
             if sector and sector in settings.features.sector_etf_map:
                 sector_ticker = settings.features.sector_etf_map[sector]
-                print(f"Stock in '{sector}' sector. Fetching data for ETF: {sector_ticker}")
                 sector_df = data_handler.get_stock_data(ticker=sector_ticker, start_date=start_date, end_date=end_date)
-            else:
-                print(f"Warning: Could not determine sector for stock {ticker}. Sector: {sector}")
         except Exception as e:
-            print(f"Warning: Failed to load sector data for {ticker}. Error: {e}")
-    else:
-        print("Crypto asset detected. Skipping sector-specific feature engineering.")
+            log.warning("sector_data_load_failed", error=str(e))
 
-    # Step 2: Calculate all features, now including the new FRED data
     feature_calculator = FeatureCalculator(df_raw.copy())
     df_features = feature_calculator.add_all_features(
         market_df=market_df.copy() if market_df is not None else None,
         sector_df=sector_df.copy() if sector_df is not None else None,
-        macro_dfs_yf=macro_dfs_yf, # Pass yfinance macro data
-        df_macro_fred=df_macro_fred # Pass new FRED macro data
+        macro_dfs_yf=macro_dfs_yf,
+        df_macro_fred=df_macro_fred
     )
     df_features.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_features.dropna(inplace=True)
 
-    # --- Check data length AFTER feature engineering and BEFORE splitting ---
-    min_required_rows = settings.models.sequence_window_size + 100 # e.g., 60 + 100 = 160
+    min_required_rows = settings.models.sequence_window_size + 100
     if len(df_features) < min_required_rows:
         raise ValueError(
             f"Insufficient data for {ticker} after feature engineering. "
             f"Need at least {min_required_rows} rows, but only {len(df_features)} remain. "
             "This is often due to long lookback periods in features (e.g., 252 days for YoY inflation)."
-        )
-    
-    # Step 3: Define target and finalize DataFrame
+        )    
     df_model = df_features.copy()
     future_price = df_model['Close'].shift(-5)
     future_ma = df_model['Close'].rolling(20).mean().shift(-5)
     df_model['UpNext'] = (future_price > future_ma).astype(int)
     df_model.dropna(inplace=True)
 
-    # Step 4: Split data
     train_size = int(len(df_model) * settings.models.train_split_ratio)
     train_df = df_model.iloc[:train_size]
     test_df = df_model.iloc[train_size:]
 
-    # Ensure only available columns are used
     feature_cols = [col for col in settings.features.get_all_feature_names() if col in df_model.columns]
     X_train, y_train = train_df[feature_cols], train_df['UpNext']
     X_test, y_test_orig = test_df[feature_cols], test_df['UpNext']
 
-    # Step 5: Prepare sequences for Transformer
     X_seq_train, y_seq_train = models.prepare_sequences(X_train.values, y_train.values, settings.models.sequence_window_size)
     X_seq_test, y_seq_test = models.prepare_sequences(X_test.values, y_test_orig.values, settings.models.sequence_window_size)
     
-    # Step 6: Package and cache
     data_package = {
         'X_train': X_train, 'y_train': y_train, 'X_test': X_test, 'y_test_orig': y_test_orig,
         'feature_cols': feature_cols, 'X_seq_train': X_seq_train, 'y_seq_train': y_seq_train,
         'X_seq_test': X_seq_test, 'y_seq_test': y_seq_test, 'df_features': df_features, 'test_df': test_df
     }
     
-    torch.save(data_package, cache_file)
-    print(f"Successfully cached processed data to '{cache_file}'")
+    data_store.save_data_package(data_package, safe_ticker)
     
     return data_package
 

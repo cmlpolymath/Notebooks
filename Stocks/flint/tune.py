@@ -1,11 +1,11 @@
 # tune.py
 import argparse
 import json
-import logging
 import sys
 import time
 import warnings
 from pathlib import Path
+import structlog
 
 import numpy as np
 import optuna
@@ -38,7 +38,7 @@ STORAGE_PATH = Path("results/tuning.db").resolve()
 STORAGE_URL = f"sqlite:///{STORAGE_PATH}"
 
 # Configure logging
-logger = logging.getLogger("flint")
+logger = structlog.get_logger(__name__)
 
 def _ensure_dirs():
     Path("results/tuning").mkdir(parents=True, exist_ok=True)

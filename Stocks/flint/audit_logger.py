@@ -6,7 +6,7 @@ import git
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import optuna
+# import optuna
 
 DB_PATH = Path('results/audit_log.duckdb')
 
@@ -99,66 +99,103 @@ def log_analysis_result(ticker: str,
         
         con.commit()
 
-def setup_tuning_table():
-    """Creates Optuna tuning table in DuckDB if not exists"""
+def setup_backtest_db():
+    """Initializes the backtest_results table in the database if it doesn't exist."""
     with duckdb.connect(str(DB_PATH)) as con:
         con.execute("""
-        CREATE TABLE IF NOT EXISTS tuning (
-            study_id VARCHAR PRIMARY KEY,
-            study_name VARCHAR,
-            ticker VARCHAR,
-            git_hash VARCHAR,
-            start_time TIMESTAMP,
-            end_time TIMESTAMP,
-            best_params JSON,
-            best_value DOUBLE,
-            trials JSON,
-            pareto_front JSON
-        );
+            CREATE TABLE IF NOT EXISTS backtest_results (
+                backtest_id UBIGINT PRIMARY KEY,
+                execution_timestamp TIMESTAMP,
+                ticker VARCHAR,
+                model_name VARCHAR,
+                backtest_parameters JSON,
+                performance_metrics JSON,
+                git_hash VARCHAR
+            );
         """)
         con.commit()
+    print(f"Backtest results database ready at '{DB_PATH}'")
 
-def log_tuning_study(study: optuna.Study, study_name: str, ticker: str):
-    """Logs Optuna study to DuckDB tuning table"""
-    git_hash = get_git_hash()
-    start_time = study.trials[0].datetime_start
-    end_time = study.trials[-1].datetime_complete
-    
-    # Serialize trials data
-    trials_data = []
-    for trial in study.trials:
-        trials_data.append({
-            "number": trial.number,
-            "params": trial.params,
-            "value": trial.value,
-            "duration": (trial.datetime_complete - trial.datetime_start).total_seconds(),
-            "state": trial.state.name
-        })
-    
-    # For multi-objective studies
-    pareto_front = []
-    if study._is_multi_objective():
-        pareto_front = [{"values": t.values, "params": t.params} for t in study.best_trials]
-    
-    # Prepare data
-    data = {
-        "study_id": str(study._study_id),
-        "study_name": study_name,
-        "ticker": ticker,
-        "git_hash": git_hash,
-        "start_time": start_time,
-        "end_time": end_time,
-        "best_params": json.dumps(study.best_params),
-        "best_value": study.best_value,
-        "trials": json.dumps(trials_data),
-        "pareto_front": json.dumps(pareto_front)
-    }
-    
-    # Insert into DuckDB
+def log_backtest_result(ticker: str, model_name: str, parameters: dict, metrics: dict):
+    """Logs the results of a single backtest run to the database."""
     with duckdb.connect(str(DB_PATH)) as con:
-        con.execute("""
-        INSERT OR REPLACE INTO tuning 
-        (study_id, study_name, ticker, git_hash, start_time, end_time, best_params, best_value, trials, pareto_front)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, list(data.values()))
+        backtest_id = int(datetime.now().timestamp() * 1e9)
+        execution_timestamp = datetime.now()
+        git_hash = get_git_hash()
+        
+        params_json = json.dumps(parameters, default=numpy_safe_json_serializer)
+        metrics_json = json.dumps(metrics, default=numpy_safe_json_serializer)
+        
+        con.execute(
+            """
+            INSERT INTO backtest_results 
+            (backtest_id, execution_timestamp, ticker, model_name, backtest_parameters, performance_metrics, git_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+            """,
+            [backtest_id, execution_timestamp, ticker, model_name, params_json, metrics_json, git_hash]
+        )
         con.commit()
+
+# def setup_tuning_table():
+#     """Creates Optuna tuning table in DuckDB if not exists"""
+#     with duckdb.connect(str(DB_PATH)) as con:
+#         con.execute("""
+#         CREATE TABLE IF NOT EXISTS tuning (
+#             study_id VARCHAR PRIMARY KEY,
+#             study_name VARCHAR,
+#             ticker VARCHAR,
+#             git_hash VARCHAR,
+#             start_time TIMESTAMP,
+#             end_time TIMESTAMP,
+#             best_params JSON,
+#             best_value DOUBLE,
+#             trials JSON,
+#             pareto_front JSON
+#         );
+#         """)
+#         con.commit()
+
+# def log_tuning_study(study: optuna.Study, study_name: str, ticker: str):
+#     """Logs Optuna study to DuckDB tuning table"""
+#     git_hash = get_git_hash()
+#     start_time = study.trials[0].datetime_start
+#     end_time = study.trials[-1].datetime_complete
+    
+#     # Serialize trials data
+#     trials_data = []
+#     for trial in study.trials:
+#         trials_data.append({
+#             "number": trial.number,
+#             "params": trial.params,
+#             "value": trial.value,
+#             "duration": (trial.datetime_complete - trial.datetime_start).total_seconds(),
+#             "state": trial.state.name
+#         })
+    
+#     # For multi-objective studies
+#     pareto_front = []
+#     if study._is_multi_objective():
+#         pareto_front = [{"values": t.values, "params": t.params} for t in study.best_trials]
+    
+#     # Prepare data
+#     data = {
+#         "study_id": str(study._study_id),
+#         "study_name": study_name,
+#         "ticker": ticker,
+#         "git_hash": git_hash,
+#         "start_time": start_time,
+#         "end_time": end_time,
+#         "best_params": json.dumps(study.best_params),
+#         "best_value": study.best_value,
+#         "trials": json.dumps(trials_data),
+#         "pareto_front": json.dumps(pareto_front)
+#     }
+    
+#     # Insert into DuckDB
+#     with duckdb.connect(str(DB_PATH)) as con:
+#         con.execute("""
+#         INSERT OR REPLACE INTO tuning 
+#         (study_id, study_name, ticker, git_hash, start_time, end_time, best_params, best_value, trials, pareto_front)
+#         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#         """, list(data.values()))
+#         con.commit()

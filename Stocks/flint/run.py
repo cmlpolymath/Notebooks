@@ -88,6 +88,9 @@ def main():
             X_train, y_train = data_package['X_train'], data_package['y_train']
             X_test, y_test_orig = data_package['X_test'], data_package['y_test_orig']
             feature_cols, df_features = data_package['feature_cols'], data_package['df_features']
+            y_train = models.ensure_1d_series(y_train, name="target")
+            y_test_orig = models.ensure_1d_series(y_test_orig, name="target")
+
             log.info("data_preparation_complete", train_shape=X_train.shape, test_shape=X_test.shape)
 
             # Step 2: Run Monte Carlo simulation

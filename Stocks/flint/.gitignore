@@ -1,12 +1,16 @@
-__pycache__
-.ruff_cache
-results/*
+__pycache__/
+.ruff_cache/
+results/
+typescript/
+
+# File types
 *.csv
 *.txt
-**/*.env
+*.env
 *.html
-flint/*.html
-typescript/
-*.html
-typescript/
 *.json
+*.parquet
+*typescript
+
+# Logs
+logs/*/

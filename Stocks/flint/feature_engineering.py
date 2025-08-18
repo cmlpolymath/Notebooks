@@ -4,16 +4,57 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from numba import jit
 from scipy.signal import find_peaks
+import talib
+import structlog
 
+from config import settings, FeatureGroup
 from aggressors import AggressorFeatures
+
+logger = structlog.get_logger(__name__)
 
 class FeatureCalculator:
     def __init__(self, df):
         self.df = df.copy()
         self.aggressors = AggressorFeatures()
+        self._prepare_talib_arrays()
         for col in self.df.columns:
             if pd.api.types.is_numeric_dtype(self.df[col]):
                 self.df[col].values.flags.writeable = True
+    
+    def _prepare_talib_arrays(self):
+        """Prepares and caches NumPy arrays for TA-Lib functions for performance."""
+        # Ensure the DataFrame index is sorted for correct calculations
+        self.df.sort_index(inplace=True)
+        self.open = self.df['Open'].values.astype(np.float64)
+        self.high = self.df['High'].values.astype(np.float64)
+        self.low = self.df['Low'].values.astype(np.float64)
+        self.close = self.df['Close'].values.astype(np.float64)
+        self.volume = self.df['Volume'].values.astype(np.float64)
+
+    def _add_candlestick_patterns(self):
+        """
+        Adds candlestick pattern features to the DataFrame, reading the list
+        of patterns to generate directly from the central config.
+        """
+        # Get the list of pattern names from the settings object.
+        # This makes config.py the single source of truth.
+        pattern_names = settings.features.feature_groups.get(FeatureGroup.CANDLESTICK, [])
+        
+        if not pattern_names:
+            logger.info("No candlestick patterns found in config. Skipping.")
+            return
+
+        for pattern_name in pattern_names:
+            try:
+                # Get the actual function from the talib module
+                pattern_function = getattr(talib, pattern_name)
+                # Call the function with the prepared numpy arrays
+                result = pattern_function(self.open, self.high, self.low, self.close)
+                # Add the result as a new column to the DataFrame
+                self.df[pattern_name] = result
+            except Exception as e:
+                # Use a structured log if you have a logger instance here, otherwise print
+                logger.warn(f"Warning: Could not calculate pattern {pattern_name}: {e}")
 
     def _robust_fill(self, reason: str):
         """
@@ -26,11 +67,11 @@ class FeatureCalculator:
         # Count NaNs before filling for diagnostics
         nans_before = self.df[numeric_cols].isnull().sum().sum()
         if nans_before > 0:
-            print(f"Performing robust fill ({reason})... Found {nans_before} total NaN values.")
+            logger.info(f"Performing robust fill ({reason})... Found {nans_before} total NaN values.")
             self.df.ffill(inplace=True)
             self.df.bfill(inplace=True)
             nans_after = self.df[numeric_cols].isnull().sum().sum()
-            print(f"Fill complete. {nans_after} NaN values remain.")
+            logger.info(f"Fill complete. {nans_after} NaN values remain.")
 
     def add_all_features(
         self,
@@ -43,7 +84,11 @@ class FeatureCalculator:
         
         # --- Stage 1: Base Technical Indicators ---
         # These are calculated on the raw stock data first.
-        print("Calculating base technical indicators...")
+        logger.info("Calculating base technical indicators...")
+        logger.info("Warming up Numba-optimized functions in AggressorFeatures...")
+        self.df = self.aggressors.add_hurst(self.df, window=100)
+        self.df = self.aggressors.add_fractal_dimension(self.df, window=14)
+        logger.info("Warm-up complete.")
         self._add_returns() # Add returns early as many features depend on it
         self._add_rsi()
         self._add_macd()
@@ -61,11 +106,10 @@ class FeatureCalculator:
         self._add_realized_vol()
         self._add_efficiency_ratio()
         self._add_vwap_zscore()
-        self.df = self.aggressors.add_hurst(self.df, window=100)
-        self.df = self.aggressors.add_fractal_dimension(self.df, window=14)
+        self._add_candlestick_patterns()
         
         # --- Stage 2: Merge All External Data Sources ---
-        print("Merging external data sources...")
+        logger.info("Merging external data sources...")
         if market_df is not None:
             self._add_spy_rsi(market_df)
             self._add_spy_return(market_df)
@@ -83,7 +127,7 @@ class FeatureCalculator:
 
         # --- Stage 4: Relational & Interaction Features ---
         # These features depend on the merged data from Stage 2.
-        print("Engineering market regime and interaction features...")
+        logger.info("Engineering market regime and interaction features...")
         self._add_market_regime()
         self._add_interaction_features()
         self._add_relational_macro_features()
@@ -95,11 +139,11 @@ class FeatureCalculator:
         # --- Final Cleanup ---
         # This final dropna should now only remove rows at the very beginning of the
         # dataset where long lookback windows prevented any calculation.
-        print("Performing final cleanup of initial lookback period...")
+        logger.info("Performing final cleanup of initial lookback period...")
         initial_len = len(self.df)
         self.df.dropna(inplace=True)
         final_len = len(self.df)
-        print(f"Dropped {initial_len - final_len} initial rows.")
+        logger.info(f"Dropped {initial_len - final_len} initial rows.")
         
         return self.df
 
@@ -269,7 +313,7 @@ class FeatureCalculator:
         self.df = pd.merge(self.df, df_macro_fred, left_on='Date', right_index=True, how='left')
 
     def _add_relational_macro_features(self):
-        print("Engineering relational macroeconomic features...")
+        logger.info("Engineering relational macroeconomic features...")
         def check_cols(*args): return all(col in self.df.columns for col in args)
 
         if check_cols('Return1', 'FedFunds'):
@@ -284,7 +328,7 @@ class FeatureCalculator:
             self.df['Stock_vs_GDP_Ratio'] = self.df['Close'] / self.df['GDP']
         if check_cols('CPI'):
             self.df['CPI_ROC_3M'] = self.df['CPI'].pct_change(63) * 100
-        print("Relational features engineered.")
+        logger.info("Relational features engineered.")
 
     def _add_kalman_filter(self, Q=1e-5, R=1e-2):
         close_prices = self.df['Close'].values
@@ -314,7 +358,7 @@ class FeatureCalculator:
 
     def _add_market_regime(self, short_window=20, long_window=60):
         if 'Close' not in self.df.columns:
-            print("Skipping regime: no Close column")
+            logger.debug("Skipping regime: no Close column")
             return
 
         # 1) compute returns once

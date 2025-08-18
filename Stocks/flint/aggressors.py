@@ -104,13 +104,13 @@ class AggressorFeatures:
         real data call.
         """
         if not self._warmed_up:
-            print("Warming up Numba-optimized functions in AggressorFeatures...")
+            # print("Warming up Numba-optimized functions in AggressorFeatures...")
             dummy_data = np.random.randn(200)
             _hurst_numba(dummy_data)
             _vectorized_katz_fd(dummy_data, 14)
             _vectorized_hurst(dummy_data, 100)
             self._warmed_up = True
-            print("Warm-up complete.")
+            # print("Warm-up complete.")
 
     def add_hurst(self, df: pd.DataFrame, window: int = 100) -> pd.DataFrame:
         """Calculates the Hurst Exponent and adds it to the DataFrame."""

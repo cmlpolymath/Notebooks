@@ -11,7 +11,7 @@ from collections import Counter
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import shap
+from shap import TreeExplainer
 import torch
 import torch.nn as nn
 from imblearn.over_sampling import ADASYN
@@ -82,6 +82,38 @@ class StockTransformer(nn.Module):
         out = self.fc_out(out)
         return out
 
+# Utility functions
+def ensure_1d_series(y, *, name: str | None = None, index=None) -> pd.Series:
+    """Coerce y into a 1D pandas Series. Accepts Series/DataFrame/ndarray/list.
+    Fast paths avoid copies and preserve pandas dtypes.
+    """
+    # Fast path: already a Series (zero-copy unless name/index change)
+    if isinstance(y, pd.Series):
+        s = y
+        if name is not None and s.name != name:
+            s = s.rename(name)  # metadata-only
+        if index is not None:
+            s = s.set_axis(index, copy=False)  # reindex labels without copying values
+        return s
+
+    # DataFrame -> first column as Series (view when possible)
+    if isinstance(y, pd.DataFrame):
+        if y.shape[1] != 1:
+            raise ValueError(f"y must have exactly 1 column; got {y.shape[1]}")
+        s = y.iloc[:, 0]  # avoids materializing a new ndarray
+        if name is not None and s.name != name:
+            s = s.rename(name)
+        if index is not None:
+            s = s.set_axis(index, copy=False)
+        return s
+
+    # ndarray/list/array-like -> 1D NumPy view if possible
+    arr = np.asarray(y)
+    if arr.ndim > 1:
+        arr = arr.reshape(-1)  # view when C/F-contiguous; copy only if needed
+    return pd.Series(arr, index=index, name=name, copy=False)
+
+
 # 2. Model Training and Prediction Functions
 def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> tuple:
     """
@@ -107,7 +139,7 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
     
     logger.info(f"Pre-engineered features found: {available_features}")
     if missing_features:
-        logger.warn(f"Missing expected features: {missing_features}")
+        logger.warning(f"Missing expected features: {missing_features}")
     
     # 2. Check class imbalance
     initial_dist = Counter(y_train)
@@ -152,6 +184,7 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
             logger.info(f"Standard ADASYN failed: {e}")
             logger.info("Falling back to no resampling...")
             X_resampled, y_resampled = X_train_scaled, y_train
+                        
             resampled_dist = initial_dist
             sampling_applied = "None_ADASYN_Failed"
     elif minority_class_count > 1:
@@ -177,7 +210,7 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
             sampling_applied = "None_ADASYN_Failed"
     else:
         # Skip ADASYN if minority class is too small (≤1 sample)
-        logger.warn(f"Minority class too small ({minority_class_count} samples). Skipping ADASYN resampling.")
+        logger.warning(f"Minority class too small ({minority_class_count} samples). Skipping ADASYN resampling.")
         X_resampled, y_resampled = X_train_scaled, y_train
         resampled_dist = initial_dist
         sampling_applied = "None_TooSmall"
@@ -187,6 +220,10 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
     
     # Convert back to DataFrame with original feature names to avoid warnings
     X_resampled_df = pd.DataFrame(X_resampled, columns=X_train.columns)
+
+    idx = pd.RangeIndex(len(X_resampled_df), name=X_train.index.name or "row")
+    X_resampled_df.index = idx
+    y_resampled.index = idx
     
     # 5. Model-based feature selection with proper DataFrame handling
     logger.info("Selecting most predictive features...")
@@ -224,13 +261,13 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
     )
     
     logger.info("Starting ultra-robust hyperparameter optimization...")
-    logger.info(f"Search space: {cfg.hyperparam_tuning_iterations} candidates × {cfg.tscv_splits} folds = {total_fits} total fits")
+    logger.info(f"Search space: {cfg.hyperparam_tuning_iterations} candidates x {cfg.tscv_splits} folds = {total_fits} total fits")
 
     # Check if we have both classes in the dataset - if not, use simpler scoring
     unique_classes = len(set(y_resampled))
     
     if unique_classes < 2:
-        logger.warn("Only one class present in dataset. Using accuracy scoring only.")
+        logger.warning("Only one class present in dataset. Using accuracy scoring only.")
         scoring_strategy = 'accuracy'
         refit_strategy = 'accuracy'
     else:
@@ -286,7 +323,6 @@ def train_enhanced_random_forest(X_train: pd.DataFrame, y_train: pd.Series) -> t
     else:
         # NORMAL MODE - Enhanced user experience with threading
         import sys
-        import threading
         from itertools import cycle
         
         training_complete = threading.Event()
@@ -416,7 +452,7 @@ def train_xgboost(X_train, y_train, params: dict | None = None):
 
 def get_shap_importance(xgb_model, X_test):
     logger.info("Calculating SHAP values...")
-    explainer = shap.TreeExplainer(xgb_model)
+    explainer = TreeExplainer(xgb_model)
     shap_values = explainer.shap_values(X_test)
     if isinstance(shap_values, list):
         # For binary classification, shap_values is a list of two arrays (for class 0 and 1)
@@ -534,54 +570,66 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
     best_model_wts = copy.deepcopy(model.state_dict())
     
     epochs = train_cfg.get('epochs', 50)
+
+    # SMART MONITORING: Adapt based on training phase
+    early_epochs_threshold = max(5, epochs // 10)  # First 10% of training
+    debug_mode = train_cfg.get('debug_mode', False)
+
     for epoch in range(1, epochs + 1):
         model.train()
-        total_loss = 0
         
-        # --- GRADIENT ACCUMULATION ---
-        # The optimizer is cleared only once at the beginning of the accumulation cycle.
+        # ADAPTIVE MONITORING STRATEGY
+        if epoch <= early_epochs_threshold or debug_mode:
+            # EARLY TRAINING: Full monitoring (detect problems early)
+            track_every = 1
+            reason = "early_training" if epoch <= early_epochs_threshold else "debug_mode"
+        else:
+            # STABLE TRAINING: Reduced monitoring (optimize performance)
+            track_every = max(1, len(train_loader) // 10)  # Sample ~10 points per epoch
+            reason = "performance_optimized"
+        
+        total_train_loss = 0.0
+        train_loss_samples = 0
+        
         optimizer.zero_grad(set_to_none=True)
-
+        
         for i, (X_batch, y_batch) in enumerate(train_loader):
             X_batch, y_batch = X_batch.to(device, non_blocking=True), y_batch.to(device, non_blocking=True)
             
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
                 outputs = model(X_batch)
                 loss = criterion(outputs, y_batch)
-                
-                # --- GRADIENT ACCUMULATION ---
-                # Normalize the loss by the number of accumulation steps.
-                # This ensures the magnitude of the final accumulated gradient is correct.
                 loss = loss / accumulation_steps
             
+            # CRITICAL: Always check for NaN (affects accuracy)
             if torch.isnan(loss):
                 logger.info(f"Epoch {epoch}: Loss is NaN. Stopping training.")
                 model.load_state_dict(best_model_wts)
                 return model, device, scaler, y_seq_test
-
-            # Accumulate the scaled loss
+            
             scaler_amp.scale(loss).backward()
             
-            total_loss += loss.item() * accumulation_steps # Un-scale for logging
-
-            # --- GRADIENT ACCUMULATION ---
-            # Perform the optimizer step only after accumulating gradients for `accumulation_steps` batches.
+            # SMART SAMPLING: More frequent early, less frequent later
+            if i % track_every == 0:
+                total_train_loss += loss.item()
+                train_loss_samples += 1
+            
             if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
-                # Clip gradients to prevent exploding gradients
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
-                # Update the model weights
                 scaler_amp.step(optimizer)
                 scaler_amp.update()
-                
-                # Clear the gradients for the next accumulation cycle
                 optimizer.zero_grad(set_to_none=True)
-            
-        avg_train_loss = total_loss / len(train_loader)
         
-        # --- Validation loop ---
+        # Calculate representative training loss
+        if train_loss_samples > 0:
+            avg_train_loss = (total_train_loss * accumulation_steps) / train_loss_samples
+        else:
+            avg_train_loss = float('nan')  # Should never happen
+        
+        # VALIDATION: ALWAYS PRECISE (this directly affects model accuracy)
         model.eval()
-        total_val_loss = 0
+        total_val_loss = 0.0
+        
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
                 X_batch, y_batch = X_batch.to(device, non_blocking=True), y_batch.to(device, non_blocking=True)
@@ -592,10 +640,16 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
         
         avg_val_loss = total_val_loss / len(val_loader)
         
-        logger.info(f"Epoch {epoch}/{epochs} -> Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
+        # ENHANCED LOGGING: Show monitoring strategy
+        if epoch <= early_epochs_threshold:
+            logger.info(f"Epoch {epoch}/{epochs} -> Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} [FULL_MONITORING]")
+        else:
+            logger.info(f"Epoch {epoch}/{epochs} -> Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} [SAMPLED_{train_loss_samples}]")
         
+        # SCHEDULER: Uses precise validation loss (affects accuracy)
         scheduler.step(avg_val_loss)
-
+        
+        # EARLY STOPPING: Uses precise validation loss (directly affects final model accuracy)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_no_improve = 0
@@ -606,10 +660,23 @@ def train_transformer(X_train, y_train, X_test, y_test, training_params: dict | 
             if epochs_no_improve >= patience:
                 logger.info(f"\nEarly stopping triggered after {patience} epochs with no improvement.")
                 break
+        
+        # OPTIONAL: Advanced monitoring for accuracy-critical scenarios
+        if debug_mode and epoch > 1:
+            # Calculate loss trend for debugging
+            if hasattr(locals(), 'prev_train_loss'):
+                train_trend = avg_train_loss - prev_train_loss
+                val_trend = avg_val_loss - prev_val_loss
+                
+                if train_trend < -0.001 and val_trend > 0.001:
+                    logger.info(f"   -> WARNING: Possible overfitting detected (train↓, val↑)")
+            
+            prev_train_loss = avg_train_loss
+            prev_val_loss = avg_val_loss
 
     logger.info("Loading best model weights...")
     model.load_state_dict(best_model_wts)
-        
+
     return model, device, scaler, y_seq_test
 
 def predict_transformer(model, device, scaler, X_test):

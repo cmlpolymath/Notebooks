@@ -18,6 +18,7 @@ import logging
 import json
 import sys
 import structlog
+import talib
 
 # ==============================================================================
 # ENUMS FOR TYPE SAFETY AND PERFORMANCE
@@ -48,6 +49,7 @@ class FeatureGroup(str, Enum):
     MACRO = "macro"
     SENTIMENT = "sentiment"
     VOLATILITY = "volatility"
+    CANDLESTICK = "candlestick"
 
 # ==============================================================================
 # PERFORMANCE OPTIMIZED BASE CLASSES
@@ -138,14 +140,15 @@ class RandomForestParams(OptimizedBaseModel):
     base_min_samples_leaf: int = Field(default=5, ge=1)
     base_max_features: float = Field(default=0.5, gt=0, le=1.0)
     param_distributions: Dict[str, List] = Field(default_factory=lambda: {
-        'n_estimators': [100, 200, 300],  # Reduced from [300, 500, 700]
-        'max_depth': [8, 12, 16],  # Reduced from [10, 15, 20, None]
-        'min_samples_split': [5, 10],  # Reduced options
-        'min_samples_leaf': [3, 5],  # Reduced options
-        'max_features': ['sqrt', 0.5],  # Reduced options
-        'max_samples': [0.7]  # Single option
+        'max_features': [15, 20, 30, 40],
+        'n_estimators': [200, 300, 500],
+        'max_depth': [8, 12, 16, None],
+        'min_samples_split': [5, 10],
+        'min_samples_leaf': [3, 5],
+        'max_features': ['sqrt', 0.5],
+        'max_samples': [0.7, 0.8]
     })
-    
+
     # New time-aware validation parameters
     tscv_splits: int = Field(default=5, ge=3, le=10, description="Number of splits for TimeSeriesSplit")
     tscv_gap: int = Field(default=5, ge=0, description="Gap between train/test in TimeSeriesSplit to prevent leakage")
@@ -240,6 +243,7 @@ class TransformerTrainingParams(OptimizedBaseModel):
     warmup_steps: int = Field(default=1000, ge=0)
     scheduler: str = Field(default='cosine', description="Learning rate scheduler")
     gradient_clip_norm: float = Field(default=1.0, gt=0)
+    debug_mode: str = Field(default=False, description='Overfitting detection')
 
 class MonteCarloParams(OptimizedBaseModel):
     """Monte Carlo simulation parameters."""
@@ -359,6 +363,9 @@ class FeatureConfig(OptimizedBaseModel):
             'PE_Ratio', 'PB_Ratio', 'PS_Ratio', 'EV_EBITDA',
             'ROE', 'ROA', 'Debt_Equity', 'Current_Ratio',
             'Quick_Ratio', 'Operating_Margin'
+        ],
+        FeatureGroup.CANDLESTICK: [
+            func for func in dir(talib) if func.startswith('CDL')
         ]
     })
     
@@ -379,6 +386,7 @@ class FeatureConfig(OptimizedBaseModel):
         # Base technical features
         features.extend(self.feature_groups[FeatureGroup.TECHNICAL])
         features.extend(self.feature_groups[FeatureGroup.VOLATILITY])
+        features.extend(self.feature_groups[FeatureGroup.CANDLESTICK])
         
         # Market context
         features.extend([f'SPY_{feat}' for feat in ['RSI14', 'Return1', 'Volume_Ratio']])
@@ -516,70 +524,72 @@ class Settings(OptimizedBaseModel):
         app_level = getattr(logging, self.app_log_level.upper(), logging.INFO)
         third_party_level = getattr(logging, self.third_party_log_level.upper(), logging.WARNING)
 
-        # This is the shared processing pipeline for ALL logs.
-        shared_processors = [
-            structlog.contextvars.merge_contextvars,
-            structlog.stdlib.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            # This processor must come last to format the log record for the handler.
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-        ]
+        # --- 1. SETUP FOR THE FILE LOGGER ---
+        log_dir = self.system.log_dir / "console_runs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create a unique, timestamped log file for each run
+        run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        log_file_path = log_dir / f"flint_run_{run_timestamp}.log"
+        
+        # This handler will write to our timestamped file.
+        file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
 
-        # --- THE ENVIRONMENT-AWARE SWITCH ---
+        # --- 2. SETUP FOR THE CONSOLE LOGGER (ENVIRONMENT-AWARE) ---
         if os.environ.get("LOG_FORMAT", "console").lower() == "json":
-            # --- PRODUCTION: JSON LOGS ---
-            # The final processor is a machine-readable JSON renderer.
-            log_renderer = structlog.processors.JSONRenderer()
-            handler = logging.StreamHandler(sys.stdout)
+            # Production console logs are plain JSON
+            console_renderer = structlog.processors.JSONRenderer()
+            console_handler = logging.StreamHandler(sys.stdout)
         else:
-            # --- DEVELOPMENT: RICH CONSOLE LOGS ---
-            # RichHandler will handle all rendering, including colors and formatting.
-            handler = RichHandler(rich_tracebacks=True, tracebacks_suppress=[])
-            
-            # --- THE FIX IS HERE ---
-            # We use a renderer that ONLY formats the key-value pairs into a string
-            # WITHOUT adding any color codes. RichHandler will add the color.
-            log_renderer = structlog.dev.ConsoleRenderer(colors=False, sort_keys=False)
+            # Development console logs are beautiful with rich
+            console_renderer = structlog.dev.ConsoleRenderer(colors=False, sort_keys=False)
+            console_handler = RichHandler(rich_tracebacks=True, tracebacks_suppress=[], show_time=False, show_level=False, show_path=False)
 
-        # Configure structlog to use the shared processors.
+        # --- 3. CREATE FORMATTERS FOR EACH HANDLER ---
+        # Formatter for the FILE HANDLER (always JSON)
+        file_formatter = structlog.stdlib.ProcessorFormatter(
+            processor=structlog.processors.JSONRenderer(),
+            foreign_pre_chain=[structlog.stdlib.add_log_level, structlog.stdlib.add_logger_name]
+        )
+        file_handler.setFormatter(file_formatter)
+
+        # Formatter for the CONSOLE HANDLER (dev or prod)
+        console_formatter = structlog.stdlib.ProcessorFormatter(
+            processor=console_renderer,
+            foreign_pre_chain=[structlog.stdlib.add_log_level, structlog.stdlib.add_logger_name]
+        )
+        console_handler.setFormatter(console_formatter)
+        
+        # --- 4. CONFIGURE STRUCTLOG (This is done once) ---
         structlog.configure(
-            processors=shared_processors,
+            processors=[
+                structlog.contextvars.merge_contextvars,
+                structlog.stdlib.add_log_level,
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+            ],
             logger_factory=structlog.stdlib.LoggerFactory(),
             wrapper_class=structlog.stdlib.BoundLogger,
             cache_logger_on_first_use=True,
         )
 
-        # This formatter connects the structlog pipeline to the standard logging handler.
-        formatter = structlog.stdlib.ProcessorFormatter(
-            # The `processor` is the final step that turns the log dictionary into a string.
-            processor=log_renderer,
-            # `foreign_pre_chain` is for logs from other libraries (e.g., yfinance).
-            foreign_pre_chain=[
-                structlog.stdlib.add_log_level,
-                structlog.stdlib.add_logger_name,
-            ],
-        )
-
-        handler.setFormatter(formatter)
-        
-        # Configure the root logger to use ONLY our configured handler.
+        # --- 5. ATTACH HANDLERS TO THE ROOT LOGGER ---
         root_logger = logging.getLogger()
-        root_logger.handlers = [handler]
+        # IMPORTANT: Clear any existing handlers to prevent duplicates
+        root_logger.handlers = [console_handler, file_handler]
         root_logger.setLevel(third_party_level)
 
-        # Set the level for our application's specific logger.
+        # Configure your application's logger
         app_logger = logging.getLogger("flint")
         app_logger.setLevel(app_level)
-        app_logger.propagate = False # Prevent duplicate messages.
+        app_logger.propagate = False # We've handled it, so no need to propagate
 
         log = structlog.get_logger("flint.config")
         log.info(
             "logging_configured", 
-            renderer=log_renderer.__class__.__name__,
-            handler=handler.__class__.__name__,
-            app_level=self.app_log_level
+            console_handler=console_handler.__class__.__name__,
+            file_handler=file_handler.__class__.__name__,
+            log_file=str(log_file_path)
         )
 
     def apply_overrides(self, overrides: Dict[str, Any]) -> None:
