@@ -1,146 +1,148 @@
 #!/usr/bin/env python3
 """
+Ticker Ingestion Client - Kit (TIC-K)
+
 Production-grade financial data pipeline for OHLCV and fundamentals data.
-No-cost solution using yfinance, robin_stocks, and Alpha Vantage.
+No-cost solution using yfinance, robin_stocks, and Alpha Vantage
 
 USAGE:
-    # Use full universe from parquet
-    python tick.py
-    
-    # Test with subset (first N tickers)
-    python tick.py --test 10
-    
-    # Specific tickers only
-    python tick.py --tickers AAPL MSFT GOOGL TSLA
-    
-    # Skip fundamentals
-    python tick.py --no-fundamentals
-    
-    # Combine options
-    python tick.py --tickers AAPL MSFT --no-fundamentals
+    python tick.py                                        # Full universe
+    python tick.py --test 10                              # First 10 tickers
+    python tick.py --tickers AAPL MSFT                    # Specific tickers
+    python tick.py --no-fundamentals                      # OHLCV only
+    python tick.py --tickers AAPL MSFT --no-fundamentals  # Combine options
+    python tick.py --test 5000 --no-fundamentals          # Batch processing
 """
 
 import os
-from pathlib import Path
-from dotenv import load_dotenv
 import sys
 import time
-import json
 import logging
 import argparse
+import functools
+from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Tuple, Optional
+from typing import List, Optional, Callable
 import pandas as pd
 import duckdb
 import yfinance as yf
 import requests
 
-# Optional: robin_stocks (install: pip install robin-stocks)
+# Optional: robin_stocks
 try:
     import robin_stocks.robinhood as r
     ROBINHOOD_AVAILABLE = True
 except ImportError:
     ROBINHOOD_AVAILABLE = False
-    print("Warning: robin_stocks not available. Install with: uv add robin-stocks")
 
 # =============================================================================
-# CONFIGURATION
+# CONFIG & UTILS
 # =============================================================================
 
 class Config:
     # Paths
-    UNIVERSE_PARQUET = "data_drops/universe_common.parquet"
-    OUT_OHLCV_DIR = "data_drops/ohlcv_daily"
-    OUT_FUND_DIR = "data_drops/fundamentals"
-    DB_PATH = "data_drops/pipeline_state.duckdb"
-    LOG_PATH = "logs/pipeline.log"
-
-    # Try a few likely locations (choose what you want)
-    candidates = [
-        Path.cwd() / ".env",                      # repo root if running from there
-        Path("/workspaces") / ".env",             # less common
-        Path.home() / ".config/myapp/.env",       # private location
-    ]
-
-    for p in candidates:
-        if p.exists():
-            load_dotenv(dotenv_path=p, override=False)
-            break
+    BASE_DIR = Path("data_drops")
+    DB_PATH = BASE_DIR / "pipeline_state.duckdb"
+    LOG_PATH = Path("logs/pipeline.log")
+    UNIVERSE_PATH = Path("universe_common.parquet")
     
-    # Date range
+    # Date Range
     START_DATE = (datetime.now() - timedelta(days=365*10)).strftime("%Y-%m-%d")
     END_DATE = datetime.now().strftime("%Y-%m-%d")
     
-    # Rate limiting (yfinance scraping safe defaults)
-    TARGET_TPM = 18  # tickers per minute
-    PER_REQUEST_SLEEP_SEC = 0.40
+    # Rate Limits & Settings
+    TARGET_TPM = 18  # Tickers per minute
+    PER_REQUEST_SLEEP = 0.4  # Smooths bursts between individual requests
     BATCH_SIZE = 50
-    MAX_RETRIES = 3
-    BACKOFF_BASE_SEC = 2.0
+    MAX_RETRIES = 4
+    BACKOFF_BASE = 2.0
     
-    # Data sources
+    # Data Sources
     PRICE_PRIMARY = "yfinance"
     PRICE_FALLBACK = "robinhood"
     ENABLE_FUNDAMENTALS = True
+    USE_ROBINHOOD_LOGIN = False
     
     # Alpha Vantage
-    ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
-    AV_BASE_URL = "https://www.alphavantage.co/query"
-    AV_CALL_SLEEP_SEC = 12.5  # ~5 calls/min
-    AV_DAILY_CAP = 500
+    AV_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
+    AV_URL = "https://www.alphavantage.co/query"
+    AV_SLEEP = 15  # Space out calls conservatively
+    AV_CAP = 25  # Free tier actual limit
     AV_STATEMENTS = ["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"]
     
-    # Robinhood credentials
+    # Robinhood
     ROBIN_USER = os.getenv("ROBIN_USER", "")
     ROBIN_PASS = os.getenv("ROBIN_PASS", "")
-    USE_ROBINHOOD_LOGIN = False  # Set to True if using Robinhood
-    
+
     @classmethod
-    def calc_batch_sleep(cls) -> float:
-        """Calculate sleep time between batches to maintain target TPM."""
-        per_batch_time = cls.BATCH_SIZE * cls.PER_REQUEST_SLEEP_SEC
+    def batch_sleep(cls):
+        """Calculate sleep between batches to maintain target TPM."""
+        per_batch_time = cls.BATCH_SIZE * cls.PER_REQUEST_SLEEP
         target_batch_time = (cls.BATCH_SIZE / cls.TARGET_TPM) * 60
         return max(0, target_batch_time - per_batch_time)
 
-# =============================================================================
-# LOGGING SETUP
-# =============================================================================
 
-def setup_logging(log_path: str):
+def setup_logging():
     """Configure logging to file and console."""
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    
+    Config.LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(message)s',
         handlers=[
-            logging.FileHandler(log_path),
+            logging.FileHandler(Config.LOG_PATH),
             logging.StreamHandler(sys.stdout)
         ]
     )
 
+
+def retry_with_backoff(retries=3, backoff_base=2.0):
+    """Decorator to retry function with exponential backoff."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_err = None
+            for attempt in range(retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_err = e
+                    if attempt < retries - 1:
+                        backoff = backoff_base ** attempt
+                        logging.warning(f"{func.__name__} attempt {attempt + 1} failed: {str(e)[:100]}. Backoff {backoff}s")
+                        time.sleep(backoff)
+            raise last_err
+        return wrapper
+    return decorator
+
+
+def atomic_write(df: pd.DataFrame, path: Path):
+    """Write parquet atomically using temp file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix('.tmp')
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)
+
+
 # =============================================================================
-# DATABASE INITIALIZATION
+# DATABASE
 # =============================================================================
 
 class StateManager:
     """Manages pipeline state using DuckDB."""
     
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        # Ensure directory exists before connecting
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self.con = duckdb.connect(db_path)
-        self._init_tables()
-    
-    def _init_tables(self):
+    def __init__(self):
+        Config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.con = duckdb.connect(str(Config.DB_PATH))
+        self._init_schema()
+
+    def _init_schema(self):
         """Create state tracking tables."""
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS ohlcv_runs (
                 ticker VARCHAR PRIMARY KEY,
                 status VARCHAR,
-                source_used VARCHAR,
-                last_attempt_ts TIMESTAMP,
+                source VARCHAR,
+                last_ts TIMESTAMP,
                 rows BIGINT,
                 start_dt DATE,
                 end_dt DATE,
@@ -149,591 +151,427 @@ class StateManager:
         """)
         
         self.con.execute("""
-            CREATE TABLE IF NOT EXISTS fundamentals_runs (
+            CREATE TABLE IF NOT EXISTS fund_runs (
                 ticker VARCHAR,
-                statement_type VARCHAR,
+                stmt VARCHAR,
                 status VARCHAR,
-                last_attempt_ts TIMESTAMP,
+                last_ts TIMESTAMP,
                 rows BIGINT,
-                period_min VARCHAR,
-                period_max VARCHAR,
+                p_min VARCHAR,
+                p_max VARCHAR,
                 error VARCHAR,
-                PRIMARY KEY (ticker, statement_type)
+                PRIMARY KEY (ticker, stmt)
             );
         """)
         
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS gaps (
                 ticker VARCHAR,
-                gap_start DATE,
-                gap_end DATE,
-                created_ts TIMESTAMP
+                start DATE,
+                end DATE,
+                ts TIMESTAMP
             );
         """)
-    
-    def seed_tickers(self, tickers: List[str]):
-        """Add new tickers to ohlcv_runs table."""
+
+    def seed(self, tickers: List[str]):
+        """Add new tickers to tracking table."""
         self.con.execute("""
             INSERT INTO ohlcv_runs (ticker, status)
-            SELECT t.ticker, 'pending'
-            FROM (SELECT UNNEST(?) AS ticker) t
-            LEFT JOIN ohlcv_runs r ON r.ticker = t.ticker
-            WHERE r.ticker IS NULL;
+            SELECT t, 'pending'
+            FROM (SELECT UNNEST(?) AS t)
+            WHERE t NOT IN (SELECT ticker FROM ohlcv_runs)
         """, [tickers])
-    
-    def mark_ohlcv(self, ticker: str, status: str, source_used: Optional[str] = None,
-                   rows: Optional[int] = None, start_dt: Optional[str] = None,
-                   end_dt: Optional[str] = None, error: Optional[str] = None):
+
+    def update_ohlcv(self, ticker: str, status: str, source: Optional[str] = None,
+                     rows: Optional[int] = None, start: Optional[str] = None,
+                     end: Optional[str] = None, error: Optional[str] = None):
         """Update OHLCV run status."""
         self.con.execute("""
             UPDATE ohlcv_runs
             SET status = ?,
-                source_used = COALESCE(?, source_used),
-                last_attempt_ts = CURRENT_TIMESTAMP,
+                source = COALESCE(?, source),
+                last_ts = CURRENT_TIMESTAMP,
                 rows = COALESCE(?, rows),
                 start_dt = COALESCE(?, start_dt),
                 end_dt = COALESCE(?, end_dt),
                 error = ?
-            WHERE ticker = ?;
-        """, [status, source_used, rows, start_dt, end_dt, error, ticker])
-    
-    def mark_fundamentals(self, ticker: str, statement_type: str, status: str,
-                         rows: Optional[int] = None, period_min: Optional[str] = None,
-                         period_max: Optional[str] = None, error: Optional[str] = None):
+            WHERE ticker = ?
+        """, [status, source, rows, start, end, error, ticker])
+
+    def update_fund(self, ticker: str, stmt: str, status: str,
+                    rows: Optional[int] = None, p_min: Optional[str] = None,
+                    p_max: Optional[str] = None, error: Optional[str] = None):
         """Update fundamentals run status."""
         self.con.execute("""
-            INSERT INTO fundamentals_runs 
-            (ticker, statement_type, status, last_attempt_ts, rows, period_min, period_max, error)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
-            ON CONFLICT (ticker, statement_type) DO UPDATE SET
+            INSERT INTO fund_runs VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+            ON CONFLICT (ticker, stmt) DO UPDATE SET
                 status = excluded.status,
-                last_attempt_ts = excluded.last_attempt_ts,
-                rows = COALESCE(excluded.rows, fundamentals_runs.rows),
-                period_min = COALESCE(excluded.period_min, fundamentals_runs.period_min),
-                period_max = COALESCE(excluded.period_max, fundamentals_runs.period_max),
-                error = excluded.error;
-        """, [ticker, statement_type, status, rows, period_min, period_max, error])
-    
-    def get_pending_ohlcv(self) -> List[str]:
-        """Get list of pending OHLCV tickers."""
-        result = self.con.execute("""
-            SELECT ticker FROM ohlcv_runs
-            WHERE status IN ('pending', 'failed')
-            ORDER BY ticker;
-        """).fetchall()
-        return [row[0] for row in result]
-    
-    def get_successful_tickers(self) -> List[str]:
-        """Get tickers with successful OHLCV downloads."""
-        result = self.con.execute("""
-            SELECT ticker FROM ohlcv_runs WHERE status = 'success'
-        """).fetchall()
-        return [row[0] for row in result]
-    
-    def check_fundamentals_exists(self, ticker: str, statement_type: str) -> bool:
-        """Check if fundamentals already successfully retrieved."""
-        result = self.con.execute("""
-            SELECT 1 FROM fundamentals_runs
-            WHERE ticker = ? AND statement_type = ? AND status = 'success'
-        """, [ticker, statement_type]).fetchone()
+                last_ts = CURRENT_TIMESTAMP,
+                rows = COALESCE(excluded.rows, fund_runs.rows),
+                p_min = COALESCE(excluded.p_min, fund_runs.p_min),
+                p_max = COALESCE(excluded.p_max, fund_runs.p_max),
+                error = excluded.error
+        """, [ticker, stmt, status, rows, p_min, p_max, error])
+
+    def get_pending(self) -> List[str]:
+        """Get pending OHLCV tickers."""
+        return [r[0] for r in self.con.execute(
+            "SELECT ticker FROM ohlcv_runs WHERE status IN ('pending', 'failed') ORDER BY ticker"
+        ).fetchall()]
+
+    def get_success(self) -> List[str]:
+        """Get successfully completed OHLCV tickers."""
+        return [r[0] for r in self.con.execute(
+            "SELECT ticker FROM ohlcv_runs WHERE status = 'success'"
+        ).fetchall()]
+
+    def fund_exists(self, ticker: str, stmt: str) -> bool:
+        """Check if fundamentals already retrieved successfully."""
+        result = self.con.execute(
+            "SELECT 1 FROM fund_runs WHERE ticker = ? AND stmt = ? AND status = 'success'",
+            [ticker, stmt]
+        ).fetchone()
         return result is not None
-    
-    def log_gap(self, ticker: str, gap_start: str, gap_end: str):
-        """Log a detected gap in data."""
-        self.con.execute("""
-            INSERT INTO gaps VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        """, [ticker, gap_start, gap_end])
-    
+
+    def log_gap(self, ticker: str, start: str, end: str):
+        """Log detected gap in data."""
+        self.con.execute("INSERT INTO gaps VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [ticker, start, end])
+
     def close(self):
         """Close database connection."""
         self.con.close()
 
+
 # =============================================================================
-# DATA FETCHERS
+# FETCHERS
 # =============================================================================
 
-class DataFetcher:
+class Fetcher:
     """Handles data retrieval from various sources."""
     
     @staticmethod
-    def fetch_ohlcv_yfinance(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """Fetch OHLCV data from Yahoo Finance."""
-        try:
-            df = yf.download(ticker, start=start_date, end=end_date, 
-                           interval="1d", progress=False, auto_adjust=False)
-            
-            if df is None or df.empty:
-                raise ValueError("Empty OHLCV from yfinance")
-            
-            # Flatten MultiIndex columns if present (happens with single ticker)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            
-            # Reset index to convert DatetimeIndex to column
-            df = df.reset_index()
-            
-            # Ensure the date column is named 'Date'
-            if 'Date' not in df.columns:
-                # Find the date column (usually first column or named 'index')
-                for col in df.columns:
-                    if pd.api.types.is_datetime64_any_dtype(df[col]) or col.lower() in ['date', 'index']:
-                        df = df.rename(columns={col: 'Date'})
-                        break
-            
-            # Add ticker column
-            df["ticker"] = ticker
-            
-            # Ensure Date is datetime
-            if 'Date' in df.columns:
-                df['Date'] = pd.to_datetime(df['Date'])
-            
-            # Verify we have essential columns
-            essential_cols = ["Date", "Open", "High", "Low", "Close", "Volume"]
-            missing = [col for col in essential_cols if col not in df.columns]
-            if missing:
-                logging.warning(f"{ticker}: Missing columns {missing}. Available: {list(df.columns)}")
-            
-            return df
-            
-        except Exception as e:
-            logging.error(f"yfinance fetch failed for {ticker}: {e}")
-            raise
-    
+    def _clean_ohlcv(df: pd.DataFrame, ticker: str):
+        """Clean and validate OHLCV data, return (df, gaps)."""
+        if df.empty:
+            raise ValueError("Empty data returned")
+        
+        # Flatten MultiIndex columns if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        
+        # Reset index to make date a column
+        df = df.reset_index()
+        
+        # Find and normalize date column
+        date_col = next(
+            (c for c in df.columns if str(c).lower() in ['date', 'index', 'begins_at']),
+            None
+        )
+        if not date_col:
+            raise ValueError(f"No date column found in {list(df.columns)}")
+        
+        df = df.rename(columns={date_col: 'Date'})
+        df['Date'] = pd.to_datetime(df['Date'])
+        df['ticker'] = ticker
+        
+        # Deduplicate and sort
+        df = df.sort_values('Date').drop_duplicates('Date').reset_index(drop=True)
+        
+        # Detect gaps (> 5 days between consecutive dates)
+        gaps = []
+        if len(df) > 1:
+            deltas = df['Date'].diff().dt.days
+            gap_indices = deltas[deltas > 5].index
+            for i in gap_indices:
+                start = df.loc[i-1, 'Date'].strftime('%Y-%m-%d')
+                end = df.loc[i, 'Date'].strftime('%Y-%m-%d')
+                gaps.append((start, end))
+        
+        return df, gaps
+
     @staticmethod
-    def fetch_ohlcv_robinhood(ticker: str) -> pd.DataFrame:
-        """Fetch OHLCV data from Robinhood (requires login)."""
+    def get_yfinance(ticker: str):
+        """Fetch OHLCV from Yahoo Finance."""
+        df = yf.download(
+            ticker,
+            start=Config.START_DATE,
+            end=Config.END_DATE,
+            interval="1d",
+            progress=False,
+            auto_adjust=False
+        )
+        return Fetcher._clean_ohlcv(df, ticker)
+
+    @staticmethod
+    def get_robinhood(ticker: str):
+        """Fetch OHLCV from Robinhood."""
         if not ROBINHOOD_AVAILABLE:
-            raise RuntimeError("robin_stocks not installed")
+            raise ImportError("robin_stocks not installed")
         
-        try:
-            # Fetch last 5 years
-            hist = r.stocks.get_stock_historicals(
-                ticker, interval="day", span="5year", bounds="regular"
-            )
-            
-            if not hist:
-                raise ValueError("Empty OHLCV from Robinhood")
-            
-            df = pd.DataFrame(hist)
-            
-            # Normalize column names
-            df = df.rename(columns={
-                "begins_at": "Date",
-                "open_price": "Open",
-                "high_price": "High",
-                "low_price": "Low",
-                "close_price": "Close",
-                "volume": "Volume"
-            })
-            
-            df["Date"] = pd.to_datetime(df["Date"])
-            df["ticker"] = ticker
-            
-            # Convert price columns to float
-            for col in ["Open", "High", "Low", "Close"]:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-            
-            if "Volume" in df.columns:
-                df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
-            
-            return df
-        except Exception as e:
-            logging.error(f"Robinhood fetch failed for {ticker}: {e}")
-            raise
-    
+        hist = r.stocks.get_stock_historicals(ticker, interval="day", span="5year")
+        if not hist:
+            raise ValueError("No data from Robinhood")
+        
+        df = pd.DataFrame(hist).rename(columns={
+            "begins_at": "Date",
+            "open_price": "Open",
+            "close_price": "Close",
+            "high_price": "High",
+            "low_price": "Low",
+            "volume": "Volume"
+        })
+        
+        return Fetcher._clean_ohlcv(df, ticker)
+
     @staticmethod
-    def fetch_fundamentals_alphavantage(ticker: str, statement_type: str, 
-                                       api_key: str) -> pd.DataFrame:
+    def get_fundamentals(ticker: str, stmt: str):
         """Fetch fundamentals from Alpha Vantage."""
-        try:
-            params = {
-                "function": statement_type,
-                "symbol": ticker,
-                "apikey": api_key
-            }
-            
-            response = requests.get(Config.AV_BASE_URL, params=params, timeout=30)
-            response.raise_for_status()
-            payload = response.json()
-            
-            # Check for throttling or error messages
-            if "Note" in payload or "Information" in payload:
-                msg = payload.get("Note") or payload.get("Information")
-                raise RuntimeError(f"AlphaVantage throttled/error: {msg}")
-            
-            # Parse annual and quarterly reports
-            annual = payload.get("annualReports", [])
-            quarterly = payload.get("quarterlyReports", [])
-            
-            if not annual and not quarterly:
-                raise ValueError("No fundamentals data in response")
-            
-            records = []
-            for report in annual:
-                report["period_type"] = "annual"
-                report["ticker"] = ticker
-                records.append(report)
-            
-            for report in quarterly:
-                report["period_type"] = "quarterly"
-                report["ticker"] = ticker
-                records.append(report)
-            
-            df = pd.DataFrame(records)
-            return df
-            
-        except Exception as e:
-            logging.error(f"AlphaVantage fetch failed for {ticker} {statement_type}: {e}")
-            raise
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-def ensure_dirs(*paths):
-    """Create directories if they don't exist."""
-    for path in paths:
-        os.makedirs(path, exist_ok=True)
-
-def atomic_write_parquet(df: pd.DataFrame, path: str):
-    """Write parquet atomically using temp file."""
-    ensure_dirs(os.path.dirname(path))
-    tmp_path = path + ".tmp"
-    df.to_parquet(tmp_path, index=False)
-    os.replace(tmp_path, path)
-
-def validate_and_clean_ohlcv(df: pd.DataFrame, ticker: str) -> Tuple[pd.DataFrame, List[Tuple[str, str]]]:
-    """Validate and clean OHLCV data, return cleaned df and list of gaps."""
-    
-    # Ensure Date column exists
-    if "Date" not in df.columns:
-        # Try to find date column
-        date_cols = [col for col in df.columns if 'date' in col.lower()]
-        if not date_cols:
-            raise ValueError(f"No Date column found. Available columns: {list(df.columns)}")
-        df = df.rename(columns={date_cols[0]: 'Date'})
-    
-    # Ensure Date is datetime type
-    df["Date"] = pd.to_datetime(df["Date"])
-    
-    # Sort and deduplicate
-    df = df.sort_values("Date").drop_duplicates(subset=["Date"]).reset_index(drop=True)
-    
-    # Detect gaps (simple version - consecutive dates)
-    gaps = []
-    
-    for i in range(1, len(df)):
-        prev_date = df.loc[i-1, "Date"]
-        curr_date = df.loc[i, "Date"]
-        gap_days = (curr_date - prev_date).days
+        resp = requests.get(
+            Config.AV_URL,
+            params={"function": stmt, "symbol": ticker, "apikey": Config.AV_KEY},
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
         
-        # If gap > 5 days (accounting for weekends), log it
-        if gap_days > 5:
-            gaps.append((prev_date.strftime("%Y-%m-%d"), curr_date.strftime("%Y-%m-%d")))
-    
-    return df, gaps
+        # Check for API limits or errors
+        if "Note" in data or "Information" in data:
+            msg = data.get("Note") or data.get("Information")
+            raise RuntimeError(f"AlphaVantage error: {msg}")
+        
+        # Parse reports
+        records = []
+        for report_type in ['annualReports', 'quarterlyReports']:
+            for item in data.get(report_type, []):
+                item.update({
+                    'ticker': ticker,
+                    'period_type': 'annual' if 'annual' in report_type else 'quarterly'
+                })
+                records.append(item)
+        
+        if not records:
+            raise ValueError("No fundamentals data in response")
+        
+        return pd.DataFrame(records)
 
-def chunk_list(lst: List, size: int):
-    """Split list into chunks."""
-    for i in range(0, len(lst), size):
-        yield lst[i:i + size]
-
-def should_use_fallback(attempt: int, error_msg: str) -> bool:
-    """Determine if fallback source should be used."""
-    return attempt >= 2
 
 # =============================================================================
-# MAIN PIPELINE
+# PIPELINE
 # =============================================================================
 
 class Pipeline:
     """Main pipeline orchestrator."""
     
-    def __init__(self, config: Config, ticker_override: Optional[List[str]] = None,
-                 test_limit: Optional[int] = None):
-        self.config = config
-        self.state = StateManager(config.DB_PATH)
-        self.fetcher = DataFetcher()
-        self.robinhood_logged_in = False
-        self.ticker_override = ticker_override
-        self.test_limit = test_limit
-    
-    def initialize(self):
-        """Initialize pipeline: directories, logging, universe."""
-        ensure_dirs(
-            self.config.OUT_OHLCV_DIR,
-            self.config.OUT_FUND_DIR,
-            os.path.join(self.config.OUT_FUND_DIR, "income_statement"),
-            os.path.join(self.config.OUT_FUND_DIR, "balance_sheet"),
-            os.path.join(self.config.OUT_FUND_DIR, "cash_flow"),
-            "logs",
-            "data"
-        )
+    def __init__(self, tickers: Optional[List[str]] = None, limit: Optional[int] = None):
+        self.db = StateManager()
+        self.limit = limit
+        self.rh_active = False
         
-        setup_logging(self.config.LOG_PATH)
-        logging.info("=" * 80)
-        logging.info("Pipeline Starting")
-        logging.info("=" * 80)
-        
-        # Determine tickers to process
-        if self.ticker_override:
-            # Use command-line provided tickers
-            tickers = self.ticker_override
-            logging.info(f"Using {len(tickers)} tickers from command line: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+        # Determine which tickers to process
+        if tickers:
+            self.targets = tickers
+            logging.info(f"Using {len(tickers)} tickers from command line")
         else:
-            # Load from universe file
-            if not os.path.exists(self.config.UNIVERSE_PARQUET):
-                logging.error(f"Universe file not found: {self.config.UNIVERSE_PARQUET}")
+            if not Config.UNIVERSE_PATH.exists():
+                logging.error(f"Universe file not found: {Config.UNIVERSE_PATH}")
                 sys.exit(1)
             
-            universe = pd.read_parquet(self.config.UNIVERSE_PARQUET)
-            tickers = universe["ticker"].dropna().unique().tolist()
-            
-            # Apply test limit if specified
-            if self.test_limit:
-                tickers = tickers[:self.test_limit]
-                logging.info(f"TEST MODE: Limited to first {self.test_limit} tickers")
-            
-            logging.info(f"Loaded {len(tickers)} tickers from universe")
+            universe = pd.read_parquet(Config.UNIVERSE_PATH)
+            self.targets = universe["ticker"].dropna().unique().tolist()
+            logging.info(f"Loaded {len(self.targets)} tickers from universe")
         
-        self.state.seed_tickers(tickers)
+        # Apply test limit if specified
+        if self.limit:
+            self.targets = self.targets[:self.limit]
+            logging.info(f"TEST MODE: Limited to first {self.limit} tickers")
+        
+        # Seed database
+        self.db.seed(self.targets)
         
         # Login to Robinhood if configured
-        if self.config.USE_ROBINHOOD_LOGIN and ROBINHOOD_AVAILABLE:
+        if Config.USE_ROBINHOOD_LOGIN and ROBINHOOD_AVAILABLE:
             try:
-                r.login(username=self.config.ROBIN_USER, password=self.config.ROBIN_PASS)
-                self.robinhood_logged_in = True
+                r.login(Config.ROBIN_USER, Config.ROBIN_PASS)
+                self.rh_active = True
                 logging.info("Logged into Robinhood")
             except Exception as e:
                 logging.warning(f"Robinhood login failed: {e}")
-    
-    def process_ohlcv_ticker(self, ticker: str) -> bool:
-        """Process single ticker for OHLCV data. Returns True on success."""
-        self.state.mark_ohlcv(ticker, "running", error=None)
+
+    @retry_with_backoff(retries=Config.MAX_RETRIES, backoff_base=Config.BACKOFF_BASE)
+    def _fetch_ohlcv_safe(self, ticker: str):
+        """Fetch OHLCV with fallback logic."""
+        try:
+            df, gaps = Fetcher.get_yfinance(ticker)
+            return "yfinance", df, gaps
+        except Exception as e:
+            # Try fallback if configured
+            if Config.PRICE_FALLBACK == "robinhood" and self.rh_active:
+                logging.info(f"{ticker}: Falling back to Robinhood")
+                df, gaps = Fetcher.get_robinhood(ticker)
+                return "robinhood", df, gaps
+            raise e
+
+    def process_ohlcv(self, ticker: str) -> bool:
+        """Process single ticker for OHLCV data."""
+        time.sleep(Config.PER_REQUEST_SLEEP)  # Rate limiting
+        self.db.update_ohlcv(ticker=ticker, status="running")
         
-        attempt = 0
-        last_error = None
-        source_used = None
-        
-        while attempt < self.config.MAX_RETRIES:
-            try:
-                time.sleep(self.config.PER_REQUEST_SLEEP_SEC)
-                
-                # Try primary source
-                if self.config.PRICE_PRIMARY == "yfinance":
-                    source_used = "yfinance"
-                    df = self.fetcher.fetch_ohlcv_yfinance(
-                        ticker, self.config.START_DATE, self.config.END_DATE
-                    )
-                else:
-                    source_used = "robinhood"
-                    df = self.fetcher.fetch_ohlcv_robinhood(ticker)
-                
-                # Validate and clean
-                df_clean, gaps = validate_and_clean_ohlcv(df, ticker)
-                
-                # Log gaps
-                for gap_start, gap_end in gaps:
-                    self.state.log_gap(ticker, gap_start, gap_end)
-                    logging.warning(f"{ticker}: Gap detected {gap_start} to {gap_end}")
-                
-                # Save to parquet
-                out_path = os.path.join(self.config.OUT_OHLCV_DIR, f"{ticker}.parquet")
-                atomic_write_parquet(df_clean, out_path)
-                
-                # Mark success
-                self.state.mark_ohlcv(
-                    ticker, "success",
-                    source_used=source_used,
-                    rows=len(df_clean),
-                    start_dt=df_clean["Date"].min().strftime("%Y-%m-%d"),
-                    end_dt=df_clean["Date"].max().strftime("%Y-%m-%d"),
-                    error=None
-                )
-                
-                logging.info(f"{ticker}: Success ({source_used}, {len(df_clean)} rows)")
-                return True
-                
-            except Exception as e:
-                attempt += 1
-                last_error = str(e)
-                
-                # Try fallback if configured
-                if (self.config.PRICE_PRIMARY == "yfinance" and 
-                    self.config.PRICE_FALLBACK == "robinhood" and 
-                    should_use_fallback(attempt, last_error) and
-                    self.robinhood_logged_in):
-                    
-                    try:
-                        logging.info(f"{ticker}: Trying fallback (Robinhood)")
-                        source_used = "robinhood"
-                        df = self.fetcher.fetch_ohlcv_robinhood(ticker)
-                        df_clean, gaps = validate_and_clean_ohlcv(df, ticker)
-                        
-                        out_path = os.path.join(self.config.OUT_OHLCV_DIR, f"{ticker}.parquet")
-                        atomic_write_parquet(df_clean, out_path)
-                        
-                        self.state.mark_ohlcv(
-                            ticker, "success",
-                            source_used=source_used,
-                            rows=len(df_clean),
-                            start_dt=df_clean["Date"].min().strftime("%Y-%m-%d"),
-                            end_dt=df_clean["Date"].max().strftime("%Y-%m-%d"),
-                            error=None
-                        )
-                        
-                        logging.info(f"{ticker}: Success via fallback ({len(df_clean)} rows)")
-                        return True
-                        
-                    except Exception as e2:
-                        last_error = f"Primary: {e}; Fallback: {e2}"
-                
-                # Exponential backoff
-                if attempt < self.config.MAX_RETRIES:
-                    backoff = self.config.BACKOFF_BASE_SEC ** attempt
-                    logging.warning(f"{ticker}: Attempt {attempt} failed: {last_error[:100]}. Backoff {backoff}s")
-                    time.sleep(backoff)
-        
-        # All retries exhausted
-        self.state.mark_ohlcv(ticker, "failed", source_used=source_used, error=last_error)
-        logging.error(f"{ticker}: Failed after {self.config.MAX_RETRIES} attempts")
-        return False
-    
-    def run_ohlcv_backfill(self):
-        """Run OHLCV backfill for all pending tickers."""
-        logging.info("Starting OHLCV backfill")
-        
-        pending = self.state.get_pending_ohlcv()
-        logging.info(f"Found {len(pending)} pending tickers")
-        
-        batch_sleep = self.config.calc_batch_sleep()
-        
-        for batch_num, batch in enumerate(chunk_list(pending, self.config.BATCH_SIZE), 1):
-            logging.info(f"Processing batch {batch_num} ({len(batch)} tickers)")
+        try:
+            source, df, gaps = self._fetch_ohlcv_safe(ticker)
             
-            success_count = 0
-            for ticker in batch:
-                if self.process_ohlcv_ticker(ticker):
-                    success_count += 1
+            # Log gaps
+            for gap_start, gap_end in gaps:
+                self.db.log_gap(ticker, gap_start, gap_end)
+                logging.warning(f"{ticker}: Gap detected {gap_start} to {gap_end}")
             
-            logging.info(f"Batch {batch_num} complete: {success_count}/{len(batch)} successful")
+            # Save to parquet
+            output_path = Config.BASE_DIR / "ohlcv_daily" / f"{ticker}.parquet"
+            atomic_write(df, output_path)
             
-            if batch_num * self.config.BATCH_SIZE < len(pending):
-                logging.info(f"Batch sleep {batch_sleep:.1f}s (target {self.config.TARGET_TPM} TPM)")
+            # Mark success
+            self.db.update_ohlcv(
+                ticker=ticker,
+                status="success",
+                source=source,
+                rows=len(df),
+                start=df.Date.min().strftime('%Y-%m-%d'),
+                end=df.Date.max().strftime('%Y-%m-%d'),
+                error=None
+            )
+            
+            logging.info(f"{ticker}: Success ({source}, {len(df)} rows)")
+            return True
+            
+        except Exception as e:
+            self.db.update_ohlcv(ticker=ticker, status="failed", error=str(e))
+            logging.error(f"{ticker}: Failed - {str(e)[:100]}")
+            return False
+
+    def process_fund(self, ticker: str, stmt: str) -> bool:
+        """Process fundamentals for one ticker/statement."""
+        # Check if already done (BEFORE retry logic)
+        if self.db.fund_exists(ticker, stmt):
+            return False
+        
+        try:
+            return self._fetch_fund_with_retry(ticker, stmt)
+        except Exception as e:
+            self.db.update_fund(ticker=ticker, stmt=stmt, status="failed", error=str(e))
+            logging.error(f"{ticker} {stmt}: Failed - {str(e)[:100]}")
+            return False
+
+    @retry_with_backoff(retries=Config.MAX_RETRIES, backoff_base=Config.BACKOFF_BASE)
+    def _fetch_fund_with_retry(self, ticker: str, stmt: str) -> bool:
+        """Fetch fundamentals with retry logic."""
+        time.sleep(Config.AV_SLEEP)  # Rate limiting
+        
+        df = Fetcher.get_fundamentals(ticker, stmt)
+        
+        # Save to parquet
+        output_path = Config.BASE_DIR / "fundamentals" / stmt.lower() / f"{ticker}.parquet"
+        atomic_write(df, output_path)
+        
+        # Extract period range
+        p_min = df['fiscalDateEnding'].min() if 'fiscalDateEnding' in df.columns else None
+        p_max = df['fiscalDateEnding'].max() if 'fiscalDateEnding' in df.columns else None
+        
+        # Mark success
+        self.db.update_fund(
+            ticker=ticker,
+            stmt=stmt,
+            status="success",
+            rows=len(df),
+            p_min=p_min,
+            p_max=p_max,
+            error=None
+        )
+        
+        logging.info(f"{ticker} {stmt}: Success ({len(df)} rows)")
+        return True
+
+    def _run_batch(self, items: List, process_func: Callable, batch_sleep: float = 0):
+        """Generic batch processor with rate limiting."""
+        total = len(items)
+        success_count = 0
+        
+        for i, item in enumerate(items, 1):
+            if process_func(item):
+                success_count += 1
+            
+            # Batch-level sleep
+            if batch_sleep and i % Config.BATCH_SIZE == 0 and i < total:
+                logging.info(f"Batch {i // Config.BATCH_SIZE} complete: {success_count}/{i} successful. Sleeping {batch_sleep:.1f}s...")
                 time.sleep(batch_sleep)
         
-        logging.info("OHLCV backfill complete")
-    
-    def process_fundamentals_ticker(self, ticker: str, statement_type: str,
-                                   calls_made: int) -> Tuple[bool, int]:
-        """Process fundamentals for one ticker/statement. Returns (success, calls_made)."""
-        
-        if calls_made >= self.config.AV_DAILY_CAP:
-            logging.warning("Alpha Vantage daily cap reached")
-            return False, calls_made
-        
-        if self.state.check_fundamentals_exists(ticker, statement_type):
-            return True, calls_made
-        
-        self.state.mark_fundamentals(ticker, statement_type, "running", error=None)
-        
-        attempt = 0
-        last_error = None
-        
-        while attempt < self.config.MAX_RETRIES:
-            try:
-                time.sleep(self.config.AV_CALL_SLEEP_SEC)
-                
-                df = self.fetcher.fetch_fundamentals_alphavantage(
-                    ticker, statement_type, self.config.ALPHAVANTAGE_API_KEY
-                )
-                
-                # Determine output directory
-                stmt_dir = statement_type.lower()
-                out_dir = os.path.join(self.config.OUT_FUND_DIR, stmt_dir)
-                ensure_dirs(out_dir)
-                
-                out_path = os.path.join(out_dir, f"{ticker}.parquet")
-                atomic_write_parquet(df, out_path)
-                
-                # Extract period range
-                period_min = None
-                period_max = None
-                if "fiscalDateEnding" in df.columns:
-                    period_min = str(df["fiscalDateEnding"].min())
-                    period_max = str(df["fiscalDateEnding"].max())
-                
-                self.state.mark_fundamentals(
-                    ticker, statement_type, "success",
-                    rows=len(df),
-                    period_min=period_min,
-                    period_max=period_max,
-                    error=None
-                )
-                
-                logging.info(f"{ticker} {statement_type}: Success ({len(df)} rows)")
-                return True, calls_made + 1
-                
-            except Exception as e:
-                attempt += 1
-                last_error = str(e)
-                
-                if attempt < self.config.MAX_RETRIES:
-                    backoff = self.config.BACKOFF_BASE_SEC ** attempt
-                    logging.warning(f"{ticker} {statement_type}: Attempt {attempt} failed. Backoff {backoff}s")
-                    time.sleep(backoff)
-        
-        self.state.mark_fundamentals(ticker, statement_type, "failed", error=last_error)
-        logging.error(f"{ticker} {statement_type}: Failed after {self.config.MAX_RETRIES} attempts")
-        return False, calls_made
-    
-    def run_fundamentals_backfill(self):
-        """Run fundamentals backfill for successful OHLCV tickers."""
-        if not self.config.ENABLE_FUNDAMENTALS:
-            logging.info("Fundamentals disabled, skipping")
-            return
-        
-        if not self.config.ALPHAVANTAGE_API_KEY:
-            logging.warning("Alpha Vantage API key not set, skipping fundamentals")
-            return
-        
-        logging.info("Starting fundamentals backfill")
-        
-        tickers = self.state.get_successful_tickers()
-        logging.info(f"Processing fundamentals for {len(tickers)} tickers")
-        
-        calls_made = 0
-        
-        for ticker in tickers:
-            for statement_type in self.config.AV_STATEMENTS:
-                success, calls_made = self.process_fundamentals_ticker(
-                    ticker, statement_type, calls_made
-                )
-                
-                if calls_made >= self.config.AV_DAILY_CAP:
-                    logging.warning("Reached Alpha Vantage daily cap, stopping fundamentals")
-                    return
-        
-        logging.info(f"Fundamentals backfill complete ({calls_made} API calls)")
-    
+        return success_count
+
     def run(self):
         """Run complete pipeline."""
+        setup_logging()
+        logging.info("=" * 80)
+        logging.info(f"Pipeline Starting")
+        logging.info(f"Tickers to process: {len(self.targets)}")
+        logging.info("=" * 80)
+        
         try:
-            self.initialize()
-            self.run_ohlcv_backfill()
-            self.run_fundamentals_backfill()
+            # 1. OHLCV Backfill
+            pending = self.db.get_pending()
+            if pending:
+                logging.info(f"Starting OHLCV backfill: {len(pending)} tickers")
+                success = self._run_batch(pending, self.process_ohlcv, Config.batch_sleep())
+                logging.info(f"OHLCV backfill complete: {success}/{len(pending)} successful")
+            else:
+                logging.info("No pending OHLCV tickers")
+            
+            # 2. Fundamentals Backfill
+            if Config.ENABLE_FUNDAMENTALS and Config.AV_KEY:
+                success_tickers = self.db.get_success()
+                logging.info(f"Starting fundamentals backfill: {len(success_tickers)} tickers")
+                logging.warning(f"Alpha Vantage FREE TIER: {Config.AV_CAP} calls/day")
+                logging.warning(f"With {len(Config.AV_STATEMENTS)} statements/ticker, ~{Config.AV_CAP // len(Config.AV_STATEMENTS)} tickers/day max")
+                
+                calls_made = 0
+                tickers_completed = 0
+                
+                for ticker in success_tickers:
+                    if calls_made >= Config.AV_CAP:
+                        logging.warning("=" * 80)
+                        logging.warning(f"ALPHA VANTAGE DAILY LIMIT REACHED: {calls_made}/{Config.AV_CAP}")
+                        logging.warning(f"Completed {tickers_completed} tickers successfully")
+                        logging.warning(f"Run again tomorrow to continue")
+                        logging.warning("=" * 80)
+                        break
+                    
+                    ticker_success = True
+                    for stmt in Config.AV_STATEMENTS:
+                        if self.process_fund(ticker, stmt):
+                            calls_made += 1
+                        else:
+                            ticker_success = False
+                    
+                    if ticker_success:
+                        tickers_completed += 1
+                        logging.info(f"✓ {ticker}: All statements complete ({tickers_completed} tickers done)")
+                
+                logging.info(f"Fundamentals backfill complete: {calls_made} API calls, {tickers_completed} tickers")
+            elif not Config.ENABLE_FUNDAMENTALS:
+                logging.info("Fundamentals disabled, skipping")
+            else:
+                logging.warning("Alpha Vantage API key not set, skipping fundamentals")
+            
             logging.info("=" * 80)
             logging.info("Pipeline completed successfully")
             logging.info("=" * 80)
+            
         except Exception as e:
             logging.error(f"Pipeline failed: {e}", exc_info=True)
             raise
         finally:
-            self.state.close()
+            self.db.close()
+
 
 # =============================================================================
-# ENTRY POINT
+# MAIN
 # =============================================================================
 
 def parse_args():
@@ -746,31 +584,31 @@ Examples:
   # Full universe backfill
   python tick.py
   
-  # Test with first 10 tickers from universe
+  # Test with first 10 tickers
   python tick.py --test 10
   
-  # Process specific tickers only
-  python tick.py --tickers AAPL MSFT GOOGL TSLA
+  # Specific tickers only
+  python tick.py --tickers AAPL MSFT GOOGL
   
-  # Specific tickers without fundamentals
-  python tick.py --tickers AAPL MSFT --no-fundamentals
+  # OHLCV only (no fundamentals)
+  python tick.py --no-fundamentals
   
-  # Test mode without fundamentals (faster)
-  python tick.py --test 5 --no-fundamentals
+  # Batch processing (5000 tickers)
+  python tick.py --test 5000 --no-fundamentals
         """
     )
     
     parser.add_argument(
         '--tickers',
         nargs='+',
-        help='Specific ticker symbols to process (e.g., AAPL MSFT GOOGL)'
+        help='Specific ticker symbols to process'
     )
     
     parser.add_argument(
         '--test',
         type=int,
         metavar='N',
-        help='Test mode: process only first N tickers from universe file'
+        help='Test mode: process only first N tickers'
     )
     
     parser.add_argument(
@@ -781,11 +619,12 @@ Examples:
     
     parser.add_argument(
         '--universe',
-        default=Config.UNIVERSE_PARQUET,
-        help=f'Path to universe parquet file (default: {Config.UNIVERSE_PARQUET})'
+        default=str(Config.UNIVERSE_PATH),
+        help='Path to universe parquet file'
     )
     
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     args = parse_args()
@@ -799,12 +638,13 @@ if __name__ == "__main__":
     if args.no_fundamentals:
         Config.ENABLE_FUNDAMENTALS = False
     
-    if args.universe:
-        Config.UNIVERSE_PARQUET = args.universe
+    Config.UNIVERSE_PATH = Path(args.universe)
+    
+    # Set Robinhood login flag
+    Config.USE_ROBINHOOD_LOGIN = bool(Config.ROBIN_USER and Config.ROBIN_PASS)
     
     # Convert tickers to uppercase if provided
     ticker_override = [t.upper() for t in args.tickers] if args.tickers else None
     
     # Create and run pipeline
-    pipeline = Pipeline(Config, ticker_override=ticker_override, test_limit=args.test)
-    pipeline.run()
+    Pipeline(tickers=ticker_override, limit=args.test).run()
