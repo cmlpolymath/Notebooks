@@ -1,4 +1,4 @@
-# [✨ CML Polymath Notebooks ✨](https://cmlpolymath.github.io/gh-pages/)
+# [✨ CML Polymath Notebooks ✨](https://cmlpolymath.github.io)
 
 Welcome to this repository, which contains all the notebooks based on Data Science books I've read.
 
