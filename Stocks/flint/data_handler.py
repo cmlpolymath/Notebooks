@@ -39,7 +39,9 @@ def get_stock_data(ticker: str, start_date: str, end_date: str, force_redownload
     """Fetch stock data intelligently with structured logging."""
     Path('data').mkdir(exist_ok=True)
     safe_ticker = sanitize_ticker_for_filename(ticker)
-    parquet_path = Path(f'data/{safe_ticker}.parquet')
+    ticker_dir = Path(f'data/processed/{safe_ticker}')
+    ticker_dir.mkdir(parents=True, exist_ok=True)
+    parquet_path = ticker_dir / "ohlcv_cache.parquet"
     
     log = logger.bind(ticker=ticker, path=str(parquet_path))
 

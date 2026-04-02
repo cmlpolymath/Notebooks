@@ -30,18 +30,27 @@ The Flint pipeline was engineered to solve these problems. It is not merely a co
 
 The Flint project is comprised of a series of interconnected Python modules, each with a distinct responsibility.
 
+Here is the updated and expanded **Module Breakdown** for your README. It incorporates the significant architectural upgrades we've implemented, including high-performance storage, Numba acceleration, and the new vectorized backtester.
+
+---
+
 #### **Module Breakdown:**
 
-*   **`run.py` (Orchestrator):** The primary entry point for generating a single, up-to-the-minute prediction. It orchestrates the loading of pre-processed data and the execution of a chosen production model.
-*   **`validate.py` (The Truth Engine):** The cornerstone of the framework. This script performs a rigorous walk-forward backtest of a specified modeling strategy over a user-defined historical period. It is the ultimate arbiter of a strategy's historical performance and trustworthiness.
-*   **`preprocess.py` (Efficiency Core):** Handles the computationally expensive tasks of data loading, feature calculation, and time-series sequencing. It intelligently caches the final, model-ready tensors to disk, allowing both `run.py` and `validate.py` to execute with maximum speed.
-*   **`data_handler.py` (Data Ingestion):** An intelligent wrapper around the `yfinance` library. It maintains a local Parquet-based cache for historical price data, only downloading new data since the last run, ensuring minimal API calls and fast startup times.
-*   **`feature_engineering.py` (Signal Generation):** A powerful class-based module that calculates a rich tapestry of over 20 quantitative features. This is where the raw data is transformed into meaningful predictive signals.
-*   **`models.py` (The Model Zoo):** Defines, trains, and "bulletproofs" the machine learning models. It currently houses an `XGBClassifier`, a `RandomForestClassifier`, and a state-of-the-art `StockTransformer` deep learning model complete with positional encoding and regularization.
-*   **`predictors.py` (Advanced Forecasting):** Implements an independent `MonteCarloTrendFilter`. This sophisticated model uses jump-diffusion simulations and Gaussian Processes to provide an orthogonal, forward-looking forecast of trend strength, which can be used as a feature or a standalone signal.
-*   **`audit_logger.py` (The Scribe):** Manages a high-performance DuckDB database for logging every detail of each analysis run, providing a complete and queryable audit trail for research and compliance.
-*   **`visualization.py` (The Lens):** A Dash-based interactive web application that reads from the audit log to provide a rich visual analysis of model performance, including price charts with buy/sell signals, feature importance plots, and Monte Carlo distributions.
-*   **`config.py` (Control Panel):** A centralized configuration file that holds all system parameters, from feature lists and date ranges to model hyperparameters, allowing for easy tuning and experimentation.
+*   **`run.py` (Orchestrator):** The primary entry point for executing the full analysis pipeline. It orchestrates parameter loading, data preparation, and model execution. It features a new `--profile` flag for stable performance analysis and leverages a sophisticated `structlog` engine for real-time observability.
+*   **`preprocess.py` (The Assembler):** Orchestrates the data gathering process, triggering feature engineering and time-series sequencing. It has been refactored to move away from monolithic files, instead producing structured data artifacts stored efficiently via the `B2Data` handler.
+*   **`data_store.py` (The Vault):** A high-performance storage interface implementing the `B2Data` class. It manages a structured directory of processed artifacts, utilizing **Parquet** for DataFrames and **Blosc2** for NumPy arrays to achieve up to 15x compression and granular, high-speed data loading.
+*   **`feature_engineering.py` (The Scientist):** A robust signal-generation engine that calculates a tapestry of over 100 technical indicators and programmatically integrates the entire suite of **60+ TA-Lib candlestick patterns**.
+*   **`aggressor.py` (The Accelerator):** A specialized module that offloads computationally intensive math (like the Hurst Exponent and Fractal Dimension) to **Numba-JIT compiled** functions, providing a 50-90x speedup over standard Python implementations.
+*   **`models.py` (The Model Zoo):** Defines and "bulletproofs" the ML architectures. It houses an **"Ultra-Robust" Random Forest pipeline**—featuring adaptive ADASYN for class imbalance, time-aware cross-validation, and LightGBM stacking—alongside a PyTorch-based Stock Transformer.
+*   **`backtest.py` (The Simulator):** A high-performance, **vectorized NumPy engine** that simulates historical trading performance. It models realistic frictions, including commissions and slippage, and provides a professional tear sheet of risk metrics (Sharpe, Sortino, Max Drawdown).
+*   **`predictors.py` (Advanced Forecasting):** Implements an independent `MonteCarloTrendFilter`. This model uses jump-diffusion simulations to provide an orthogonal forecast of trend strength, now featuring interactive **Rich-based progress bars** for real-time monitoring.
+*   **`data_handler.py` (Market Ingestion):** An intelligent wrapper around `yfinance` that maintains a local Parquet cache for historical price data, performing efficient delta-updates to minimize API calls.
+*   **`economics.py` (Macro Ingestion):** A specialized, asynchronous handler that concurrently fetches and forward-fills macroeconomic indicators from the **FRED database**, ensuring the model has global economic context.
+*   **`audit_logger.py` (The Scribe):** Manages a high-performance **DuckDB database** that records every detail of each run—including configurations, predictions, and performance metrics—providing a permanent, queryable audit trail.
+*   **`config.py` (The Brain):** A centralized Pydantic-based control panel. It manages all system parameters and houses an **environment-aware logging engine** that switches between beautiful console output and machine-readable JSON.
+*   **`visualization.py` (The Lens):** An interactive dashboard utility (currently undergoing refactoring) designed to query the audit log and provide visual insights into model behavior and signal accuracy.
+*   **`tune.py` (The Optimizer):** A persistent hyperparameter tuning script that leverages **Optuna** to find optimal model configurations, storing results for automatic injection into the production pipeline.
+*   **`validate.py` (The Skeptic):** Performs rigorous walk-forward validation of modeling strategies over historical periods to ensure statistical significance and prevent overfitting before a model is promoted to production.
 
 ---
 

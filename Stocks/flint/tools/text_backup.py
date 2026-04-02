@@ -99,7 +99,8 @@ if __name__ == "__main__":
         root_dir="/workspaces/smart_dev/projects/Notebooks/Stocks",
         output_dir="/workspaces/smart_dev/projects/Notebooks/Stocks/text_output",
         include_subdirs=['flint'],
-        extensions=None,
+        extensions=".py",
         exclude_dirs=[".venv", ".vscode", ".git", "__pycache__", ".ruff_cache", "data", "results", "ml-unified"],
-        exclude_files=[".python-version", "local_settings.py", "stock_algo.ipynb", "ruff_check.log", "README.md"]  # Additional excludes
+        exclude_files=[".python-version", "local_settings.py", "stock_algo.ipynb",
+                        "ruff_check.log", "README.md", "ticker_tape_polars_tutorial.ipynb"]  # Additional excludes
     )

@@ -3,14 +3,17 @@ __pycache__
 **/*.venv/
 **/results/
 **/*.csv
+**/*.parquet
 **/*.txt
 **/*.env
 **/data/
 **/text_output/
 **/*.duckdb
 **/*.log
+**/logs/
 **/*__duckdb_optuna__code.md
 **/*stock_algo.ipynb
+**/*.code*
 *million-dollar*
 *profil*
 *cache*

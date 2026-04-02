@@ -78,6 +78,20 @@ def prepare_and_cache_data(ticker: str, start_date: str, end_date: str, force_re
         macro_dfs_yf=macro_dfs_yf,
         df_macro_fred=df_macro_fred
     )
+
+    # Integrate getML features if available
+    getml_path = data_store.get_ticker_dir(safe_ticker) / "features_getml.parquet"
+    if getml_path.exists():
+        log.info("found_getml_features", path=str(getml_path))
+        try:
+            df_getml = pd.read_parquet(getml_path)
+            # Left join to ensure we don't lose rows or mess up the timeline
+            df_features = df_features.merge(df_getml, left_index=True, right_index=True, how='left')
+            # Fill NaNs (getML features might have different lookbacks)
+            df_features.fillna(0, inplace=True) 
+        except Exception as e:
+            log.warning("getml_merge_failed", error=str(e))
+
     df_features.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_features.dropna(inplace=True)
 
